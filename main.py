@@ -3,10 +3,13 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 
 import discord
+from discord import app_commands
 from discord.ext import tasks
 
 from config import Config, load_config
-from database import ReminderDatabase
+from database import LectureDatabase, ReminderDatabase
+from embeds import COLOR_INFO
+from lecture import LectureCommands, LectureScheduler
 
 JST = timezone(timedelta(hours=9), name="JST")
 logger = logging.getLogger("rga_assistant")
@@ -108,17 +111,85 @@ def build_failure_notification(
     )
 
 
+def build_help_embed() -> discord.Embed:
+    embed = discord.Embed(
+        title="RGA Assistant の機能",
+        description="このBotで利用できる機能とコマンドの一覧です。",
+        color=COLOR_INFO,
+    )
+    embed.add_field(
+        name="チケットリマインダー",
+        value=(
+            "監視対象カテゴリでチャンネルが作成されると、自動でリマインダーを"
+            "登録します。\n"
+            "設定した時間が経過すると、チケットチャンネルまたは運営用チャンネルへ"
+            "通知します。\n"
+            "キャンセル用のキーワードに完全一致する投稿があると、未送信の"
+            "リマインダーを取り消します。"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="講義スケジュール",
+        value=(
+            "`/lecture create` 講義予定を登録します（講師・運営）。\n"
+            "`/lecture edit` 講義予定を変更します（講師・運営）。\n"
+            "`/lecture cancel` 講義予定を中止します（講師・運営）。\n"
+            "`/lecture list` 講義予定の一覧を表示します。\n"
+            "講義の開始前に、登録したチャンネルへリマインダーを送信します。"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="その他",
+        value="`/rga help` このヘルプを表示します。",
+        inline=False,
+    )
+    embed.set_footer(text="わからないことがあれば運営までお問い合わせください。")
+    return embed
+
+
+class RGACommands(app_commands.Group):
+    def __init__(self) -> None:
+        super().__init__(name="rga", description="RGA Assistant の情報を表示します。")
+
+    @app_commands.command(name="help", description="RGA Assistant の機能とコマンドを表示します。")
+    async def help(self, interaction: discord.Interaction) -> None:
+        await interaction.response.send_message(
+            embed=build_help_embed(),
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+
 class RGAAssistant(discord.Client):
-    def __init__(self, config: Config, database: ReminderDatabase) -> None:
+    def __init__(
+        self,
+        config: Config,
+        database: ReminderDatabase,
+        lecture_database: LectureDatabase,
+    ) -> None:
         super().__init__(
             intents=discord.Intents(guilds=True, messages=True, message_content=True)
         )
         self.config = config
         self.database = database
+        self.lecture_database = lecture_database
+        self.tree = app_commands.CommandTree(self)
+        self.lecture_scheduler = LectureScheduler(self, config, lecture_database)
 
     async def setup_hook(self) -> None:
         self.database.initialize()
+        self.lecture_database.initialize()
+        self.tree.add_command(LectureCommands(self.config, self.lecture_database))
+        self.tree.add_command(RGACommands())
         self.reminder_loop.start()
+        self.lecture_scheduler.start()
+        try:
+            synced = await self.tree.sync()
+            logger.info("Synced %s application commands", len(synced))
+        except discord.HTTPException:
+            logger.exception("Failed to sync application commands")
 
     async def on_ready(self) -> None:
         logger.info("Connected to Discord as %s", self.user)
@@ -131,6 +202,13 @@ class RGAAssistant(discord.Client):
             "Reminder targets: %s; operations channel: %s",
             self.config.reminder_targets,
             self.config.operations_channel_id,
+        )
+        logger.info(
+            "Lecture features: announce channel=%s; reminder lead=%s minutes; "
+            "manage roles=%s",
+            self.config.lecture_announce_channel_id,
+            self.config.lecture_reminder_minutes,
+            self.config.lecture_role_ids,
         )
         scanned = 0
         for guild in self.guilds:
@@ -460,7 +538,8 @@ def main() -> None:
         retry_max_seconds=config.retry_max_seconds,
         retry_max_attempts=config.retry_max_attempts,
     )
-    client = RGAAssistant(config, database)
+    lecture_database = LectureDatabase(config.database_path)
+    client = RGAAssistant(config, database, lecture_database)
     try:
         client.run(config.discord_token, log_handler=None)
     except discord.PrivilegedIntentsRequired:
