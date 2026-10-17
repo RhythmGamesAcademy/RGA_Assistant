@@ -1,20 +1,25 @@
 # RGA Assistant
 
-Ticket Tool連携のチケットリマインダーBotです。設定したDiscordカテゴリ内の
-チャンネルが作成されると、その作成日時を起点にリマインダーを登録し、設定した
-時間が経過した後にチケットチャンネルや運営用チャンネルへ1回送信します。
-未送信のリマインダーはSQLiteに保存され、Bot再起動後も引き継がれます。
+Ticket Tool連携のチケットリマインダーと講義スケジュール通知を行うDiscord Botです。
+設定したDiscordカテゴリ内のチャンネルが作成されると、その作成日時を起点に
+リマインダーを登録し、設定した時間が経過した後にチケットチャンネルや運営用
+チャンネルへ1回送信します。講義予定はスラッシュコマンドから登録でき、開始前に
+案内チャンネルへリマインダーを送信します。予定はSQLiteに保存され、Bot再起動後も
+引き継がれます。
 
 ## セットアップ
 
 1. Python 3.10以降をインストールします。
 2. 仮想環境を作成・有効化し、`pip install -r requirements.txt` を実行します。
 3. `.env.example` を `.env` にコピーし、環境変数を設定します（次節参照）。
-4. 監視対象カテゴリでBotに**チャンネルを見る**・**メッセージを送信**権限を
-   付与します。運営用チャンネルへ送信する場合も同様に権限を付与します。
-5. [Discord Developer Portal](https://discord.com/developers/applications)で対象アプリを開き、
+4. 監視対象カテゴリでBotに**チャンネルを見る**・**メッセージを送信**・
+   **リンクを埋め込む**権限を付与します。運営用チャンネルへ送信する場合も同様に
+   権限を付与します。講義案内を投稿するチャンネルにも同じ権限が必要です。
+5. Botを招待する際は `bot` と `applications.commands` の両方のスコープを指定します
+   （スラッシュコマンドの登録に必要です）。
+6. [Discord Developer Portal](https://discord.com/developers/applications)で対象アプリを開き、
    **Bot** > **Privileged Gateway Intents** > **Message Content Intent**を有効にします。
-6. リポジトリ直下で `python main.py` を実行します。
+7. リポジトリ直下で `python main.py` を実行します。
 
 Message Content Intentを有効にせずに起動すると、Discordが接続を拒否します。
 有効化後も同じエラーが出る場合は、Botトークンが対象アプリのものか確認してから
@@ -38,6 +43,9 @@ Botを再起動してください。
 | `RGA_RETRY_MAX_SECONDS` | | `21600` | 再試行間隔の上限（秒、既定6時間）。 |
 | `RGA_RETRY_MAX_ATTEMPTS` | | `6` | この回数失敗すると`error`状態になります。 |
 | `RGA_DATABASE_PATH` | | `data/rga_assistant.sqlite3` | SQLiteデータベースのパス。 |
+| `RGA_LECTURE_ROLE_IDS` | | 空 | 講義コマンドを実行できるロールID（カンマ区切り）。空の場合は管理者のみ。 |
+| `RGA_LECTURE_REMINDER_MINUTES` | | `15` | 講義開始の何分前にリマインダーを送るか。 |
+| `RGA_LECTURE_ANNOUNCE_CHANNEL_ID` | | 空 | 講義案内の既定投稿先チャンネル。`/lecture create` で個別指定も可能。 |
 
 旧設定 `RGA_TICKET_CATEGORY_ID`（単一カテゴリ）と `RGA_REMINDER_DAYS` も
 引き続き利用できます。
@@ -107,6 +115,44 @@ python -m tools.retry            # すべての失敗を再試行対象に戻す
 python -m tools.retry 1234567890 # 指定チャンネルのみ
 python -m tools.retry --list     # 失敗状態を一覧表示
 ```
+
+## 講義スケジュール
+
+`/lecture` コマンドで講義予定を登録し、開始前にリマインダーを送信します。
+コマンドは起動時にグローバル同期されるため、反映まで数分かかることがあります。
+
+### コマンド
+
+| コマンド | 用途 | 実行権限 |
+|---|---|---|
+| `/lecture create` | 講義予定を登録し、案内チャンネルへ自動投稿します。 | `RGA_LECTURE_ROLE_IDS` のロール保持者または管理者 |
+| `/lecture edit` | 講義予定を変更し、投稿済みメッセージを編集して変更通知を投稿します。 | 同上 |
+| `/lecture cancel` | 講義予定を中止し、投稿済みメッセージを中止表示に更新して通知します。 | 同上 |
+| `/lecture list` | 講義予定の一覧を表示します。 | 全利用者 |
+| `/rga help` | Botの機能とコマンドの説明を表示します。 | 全利用者 |
+
+`RGA_LECTURE_ROLE_IDS` が空の場合、`create` / `edit` / `cancel` は管理者のみ
+実行できます。
+
+### 登録項目
+
+講義名、開始日時（日本時間、`YYYY/MM/DD HH:MM`）、講師名、説明（任意）、
+投稿先チャンネル（未指定なら `RGA_LECTURE_ANNOUNCE_CHANNEL_ID`）です。
+
+登録時は案内メッセージを投稿先へ送信し、`/lecture list` で確認できる10文字の
+講義IDを返します。
+
+### リマインダー
+
+開始の `RGA_LECTURE_REMINDER_MINUTES` 分前（既定15分前）に、登録した投稿先
+チャンネルへリマインダーを送信します。送信状態はSQLiteに保存され、Bot再起動後も
+復元されます。予定の確認は30秒間隔で行うため、送信は最大約30秒遅れます。
+
+- 講義の開始時刻を過ぎた未送信リマインダーは送信せず、期限切れとして記録します。
+- 送信に失敗した場合は1分間隔で開始時刻まで再試行します。権限不足やチャンネル
+  不在など再試行しても成功しない失敗は期限切れにし、ログへ記録します。
+- 変更時は投稿済みの案内メッセージ（送信済みリマインダーを含む）を編集し、
+  変更通知を投稿先へ送信します。中止時は中止表示に更新し、中止通知を投稿します。
 
 ## 通知先チャンネルの設定
 
@@ -179,8 +225,10 @@ sqlite3 data/rga_assistant.sqlite3 ".backup 'backup.sqlite3'"
 | `RGA_TICKET_CATEGORY_IDS ... must contain valid values.` | カテゴリIDが正の整数のカンマ区切りか確認します。 |
 | `RGA_OPERATIONS_CHANNEL_ID is required ...` | `RGA_REMINDER_TARGET` が `operations`/`both` のときは運営チャンネルIDを設定します。 |
 | `Set either RGA_OPERATIONS_MENTION_ROLE_ID or ...` | メンションはロールかユーザーのどちらか一方だけを設定します。 |
-| リマインダーが送信されない | Botに「チャンネルを見る」「メッセージを送信」権限があるか確認します。`error` 状態なら `python -m tools.retry` で復旧します。 |
+| リマインダーが送信されない | Botに「チャンネルを見る」「メッセージを送信」「リンクを埋め込む」権限があるか確認します。`error` 状態なら `python -m tools.retry` で復旧します。 |
 | クローズしたのに通知が来る | `RGA_REMINDER_TRIGGER_TEXT` がクローズ時メッセージと完全一致しているか確認します。 |
+| スラッシュコマンドが表示されない | Bot招待時に `applications.commands` スコープを指定したか確認します。グローバル同期の反映には数分かかることがあります。 |
+| 講義コマンドで権限エラーになる | `RGA_LECTURE_ROLE_IDS` に対象ロールIDが設定されているか確認します。未設定の場合は管理者のみ実行できます。 |
 
 ## テスト
 

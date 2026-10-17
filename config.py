@@ -121,6 +121,9 @@ class Config:
     retry_max_seconds: float
     retry_max_attempts: int
     database_path: Path
+    lecture_role_ids: Tuple[int, ...]
+    lecture_reminder_minutes: int
+    lecture_announce_channel_id: int | None
 
 
 def load_config() -> Config:
@@ -205,6 +208,19 @@ def load_config() -> Config:
     )
 
     database_path = Path(os.getenv("RGA_DATABASE_PATH", "data/rga_assistant.sqlite3"))
+    lecture_role_ids = parse_discord_ids(
+        os.getenv("RGA_LECTURE_ROLE_IDS", ""),
+        "RGA_LECTURE_ROLE_IDS",
+        allow_empty=True,
+    )
+    lecture_reminder_minutes = parse_positive_int(
+        os.getenv("RGA_LECTURE_REMINDER_MINUTES", "15"),
+        "RGA_LECTURE_REMINDER_MINUTES",
+    )
+    lecture_announce_channel_id = parse_optional_id(
+        os.getenv("RGA_LECTURE_ANNOUNCE_CHANNEL_ID", ""),
+        "RGA_LECTURE_ANNOUNCE_CHANNEL_ID",
+    )
     return Config(
         discord_token=token,
         ticket_category_ids=category_ids,
@@ -219,4 +235,7 @@ def load_config() -> Config:
         retry_max_seconds=retry_max_seconds,
         retry_max_attempts=retry_max_attempts,
         database_path=database_path,
+        lecture_role_ids=lecture_role_ids,
+        lecture_reminder_minutes=lecture_reminder_minutes,
+        lecture_announce_channel_id=lecture_announce_channel_id,
     )

@@ -2,20 +2,28 @@
 
 Discord bot (`discord.py`) that watches configured Discord categories for ticket
 channels (managed by Ticket Tool) and posts one reminder N time after a channel
-was created. Reminder state persists in SQLite. Flat 3-module project — no
-packages, cogs, or service layers.
+was created. Reminder state persists in SQLite. Also schedules lecture
+announcements/reminders via slash commands. Flat module project — no packages,
+cogs, or service layers.
 
-- `main.py` — `RGAAssistant(discord.Client)`: event handlers, reminder loop,
-  message builders, and pure helpers `is_monitored_channel` /
-  `is_reminder_cancel_message`.
+- `main.py` — `RGAAssistant(discord.Client)`: event handlers, ticket reminder
+  loop, embed builders, `/rga help` group, `CommandTree` sync, and pure helpers
+  `is_monitored_channel` / `is_reminder_cancel_message` / `build_help_embed`.
+- `lecture.py` — Phase 3 lecture schedule: pure helpers
+  (`parse_start_time`, `has_lecture_permission`, embed builders), the
+  `/lecture` `app_commands.Group`, and `LectureScheduler` (30s `tasks.loop`).
+- `embeds.py` — shared embed colors (`COLOR_*`), `truncate`, `error_embed`,
+  `success_embed`. Every bot message/response is an embed; only the operations
+  mention is plain `content`.
 - `config.py` — env parsing into a frozen `Config`.
-- `database.py` — `ReminderDatabase`, the only SQLite access layer.
-- `tools/retry.py` — CLI to reset failed deliveries (`error` → `pending`).
+- `database.py` — `ReminderDatabase` (tickets) and `LectureDatabase` (lectures),
+  the only SQLite access layer. Both share one DB file.
+- `tools/retry.py` — CLI to reset failed ticket deliveries (`error` → `pending`).
 - `deploy/rga-assistant.service` — systemd unit template.
-- `specification.md` — aspirational multi-phase spec. **Only the ticket-reminder
-  feature (its Phase 2) is implemented.** Lecture schedule, inquiry
-  classification, and task-management integration do NOT exist. Don't scaffold
-  them unless asked.
+- `specification.md` — aspirational multi-phase spec. **Phases 2 (ticket
+  reminder) and 3 (lecture schedule) are implemented.** Inquiry classification
+  (Phase 4) and task-management integration (Phase 5) do NOT exist. Don't
+  scaffold them unless asked.
 
 ## Environment and commands
 
@@ -45,10 +53,14 @@ fail if run from another directory.
   `RGA_OPERATIONS_MENTION_USER_ID` (mutually exclusive).
 - Retry policy: `RGA_RETRY_BASE_SECONDS` (60), `RGA_RETRY_MAX_SECONDS` (21600),
   `RGA_RETRY_MAX_ATTEMPTS` (6).
+- Lectures: `RGA_LECTURE_ROLE_IDS` (comma-separated; empty = administrators only),
+  `RGA_LECTURE_REMINDER_MINUTES` (default 15), `RGA_LECTURE_ANNOUNCE_CHANNEL_ID`
+  (default `/lecture create` post target; per-lecture override allowed).
 - Legacy vars still read: `RGA_TICKET_CATEGORY_ID`, `RGA_REMINDER_DAYS`.
 - Invalid config exits with a message. Discord **Message Content Intent** must be
   enabled in the Developer Portal, otherwise `client.run` raises
   `PrivilegedIntentsRequired` (caught and logged in Japanese).
+- Don't read .env, instead of using .env.example.
 
 ## Behavior gotchas
 
@@ -78,4 +90,17 @@ fail if run from another directory.
 - `reminder_loop` ticks every 5s, so sends can be up to ~5s late.
 - An exact, case-sensitive match of `RGA_REMINDER_TRIGGER_TEXT` cancels the
   pending reminder; bot messages and partial matches are ignored.
+- Lecture reminders are sent only **before** the start (`RGA_LECTURE_REMINDER_MINUTES`).
+  `lectures.reminder_status` is `pending → sending → sent|expired|cancelled`;
+  `status` is `scheduled|cancelled`. `claim_due` uses `BEGIN IMMEDIATE` and also
+  expires `pending|sending` reminders whose `starts_at` has passed, so a restart
+  past the start never sends a late reminder. Transient failures retry after 60s
+  until the start; permanent ones expire. `initialize()` resets stuck
+  `sending→pending`.
+- Lecture edits recompute `reminder_due_at` only when `starts_at` changes; an
+  already-`sent` reminder stays `sent` (no duplicate). `/lecture list` is public;
+  other lecture subcommands require `RGA_LECTURE_ROLE_IDS` (or administrator).
+  Lecture messages use JST `YYYY/MM/DD HH:MM` input/output; timestamps stored UTC.
+- Commands are global-synced in `setup_hook`; invites need the
+  `applications.commands` scope.
 - User-facing strings, README, and spec are Japanese — keep them Japanese.

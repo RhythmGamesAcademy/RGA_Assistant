@@ -1,9 +1,10 @@
 import sqlite3
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _CREATE_REMINDERS = """
 CREATE TABLE IF NOT EXISTS ticket_reminders (
@@ -33,6 +34,33 @@ CREATE TABLE IF NOT EXISTS reminder_deliveries (
     sent_at TEXT,
     updated_at TEXT NOT NULL,
     PRIMARY KEY (channel_id, target)
+)
+"""
+
+_CREATE_LECTURES = """
+CREATE TABLE IF NOT EXISTS lectures (
+    lecture_id TEXT PRIMARY KEY,
+    guild_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    lecturer TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    starts_at TEXT NOT NULL,
+    announce_channel_id TEXT NOT NULL,
+    reminder_lead_minutes INTEGER NOT NULL,
+    reminder_due_at TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('scheduled', 'cancelled')),
+    reminder_status TEXT NOT NULL CHECK (
+        reminder_status IN ('pending', 'sending', 'sent', 'cancelled', 'expired')
+    ),
+    reminder_attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT,
+    last_error TEXT,
+    reminder_sent_at TEXT,
+    announcement_message_id TEXT,
+    reminder_message_id TEXT,
+    created_by TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
 )
 """
 
@@ -67,6 +95,7 @@ class ReminderDatabase:
         with sqlite3.connect(self.path) as connection:
             connection.execute(_CREATE_REMINDERS)
             connection.execute(_CREATE_DELIVERIES)
+            connection.execute(_CREATE_LECTURES)
             version = connection.execute("PRAGMA user_version").fetchone()[0]
             if version < SCHEMA_VERSION:
                 self._migrate(connection, version)
@@ -350,6 +379,303 @@ class ReminderDatabase:
             """,
             [(channel_id, target, now) for target in self.targets],
         )
+
+    @staticmethod
+    def _now() -> datetime:
+        return datetime.now(timezone.utc)
+
+
+class LectureDatabase:
+    """SQLite access layer for the lecture schedule feature (Phase 3).
+
+    Shares the same database file as :class:`ReminderDatabase` but owns only the
+    ``lectures`` table so the ticket reminder logic stays independent.
+    """
+
+    ID_LENGTH = 10
+    ID_ATTEMPTS = 5
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def initialize(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(self.path) as connection:
+            connection.execute(_CREATE_LECTURES)
+            # Stale in-flight reminders are returned to pending after a restart so
+            # a reminder interrupted by a crash is not lost.
+            connection.execute(
+                """
+                UPDATE lectures
+                SET reminder_status = 'pending', updated_at = ?
+                WHERE status = 'scheduled' AND reminder_status = 'sending'
+                """,
+                (self._now().isoformat(),),
+            )
+
+    def create(
+        self,
+        guild_id: int,
+        title: str,
+        lecturer: str,
+        description: str,
+        starts_at: datetime,
+        announce_channel_id: int,
+        reminder_lead_minutes: int,
+        created_by: int | None = None,
+    ) -> dict[str, Any]:
+        starts_at = starts_at.astimezone(timezone.utc)
+        now = self._now()
+        with sqlite3.connect(self.path) as connection:
+            connection.row_factory = sqlite3.Row
+            for _ in range(self.ID_ATTEMPTS):
+                lecture_id = uuid.uuid4().hex[: self.ID_LENGTH]
+                try:
+                    connection.execute(
+                        """
+                        INSERT INTO lectures
+                            (lecture_id, guild_id, title, lecturer, description,
+                             starts_at, announce_channel_id, reminder_lead_minutes,
+                             reminder_due_at, status, reminder_status, created_by,
+                             created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', 'pending',
+                                ?, ?, ?)
+                        """,
+                        (
+                            lecture_id,
+                            str(guild_id),
+                            title,
+                            lecturer,
+                            description,
+                            starts_at.isoformat(),
+                            str(announce_channel_id),
+                            reminder_lead_minutes,
+                            (starts_at - timedelta(minutes=reminder_lead_minutes)).isoformat(),
+                            None if created_by is None else str(created_by),
+                            now.isoformat(),
+                            now.isoformat(),
+                        ),
+                    )
+                except sqlite3.IntegrityError:
+                    continue
+                return dict(connection.execute(
+                    "SELECT * FROM lectures WHERE lecture_id = ?",
+                    (lecture_id,),
+                ).fetchone())
+        raise RuntimeError("failed to allocate a unique lecture id")
+
+    def get(self, lecture_id: str) -> dict[str, Any] | None:
+        with sqlite3.connect(self.path) as connection:
+            connection.row_factory = sqlite3.Row
+            row = connection.execute(
+                "SELECT * FROM lectures WHERE lecture_id = ?",
+                (lecture_id,),
+            ).fetchone()
+            return dict(row) if row is not None else None
+
+    def list_lectures(
+        self,
+        guild_id: int,
+        include_cancelled: bool = False,
+    ) -> list[dict[str, Any]]:
+        query = "SELECT * FROM lectures WHERE guild_id = ?"
+        parameters: list[Any] = [str(guild_id)]
+        if not include_cancelled:
+            query += " AND status != 'cancelled'"
+        query += " ORDER BY starts_at"
+        with sqlite3.connect(self.path) as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(query, parameters).fetchall()
+            return [dict(row) for row in rows]
+
+    def update(
+        self,
+        lecture_id: str,
+        title: str | None = None,
+        lecturer: str | None = None,
+        description: str | None = None,
+        starts_at: datetime | None = None,
+        announce_channel_id: int | None = None,
+        reminder_lead_minutes: int | None = None,
+    ) -> dict[str, Any] | None:
+        current = self.get(lecture_id)
+        if current is None:
+            return None
+
+        fields: dict[str, Any] = {}
+        if title is not None:
+            fields["title"] = title
+        if lecturer is not None:
+            fields["lecturer"] = lecturer
+        if description is not None:
+            fields["description"] = description
+        if announce_channel_id is not None:
+            fields["announce_channel_id"] = str(announce_channel_id)
+
+        lead = (
+            reminder_lead_minutes
+            if reminder_lead_minutes is not None
+            else current["reminder_lead_minutes"]
+        )
+        if reminder_lead_minutes is not None:
+            fields["reminder_lead_minutes"] = reminder_lead_minutes
+        if starts_at is not None or reminder_lead_minutes is not None:
+            effective_start = starts_at or datetime.fromisoformat(current["starts_at"])
+            fields["reminder_due_at"] = (
+                effective_start.astimezone(timezone.utc)
+                - timedelta(minutes=lead)
+            ).isoformat()
+        if starts_at is not None:
+            fields["starts_at"] = starts_at.astimezone(timezone.utc).isoformat()
+
+        if not fields:
+            return current
+
+        fields["updated_at"] = self._now().isoformat()
+        assignments = ", ".join(f"{name} = ?" for name in fields)
+        with sqlite3.connect(self.path) as connection:
+            connection.execute(
+                f"UPDATE lectures SET {assignments} WHERE lecture_id = ?",
+                (*fields.values(), lecture_id),
+            )
+        return self.get(lecture_id)
+
+    def cancel(self, lecture_id: str) -> dict[str, Any] | None:
+        now = self._now().isoformat()
+        with sqlite3.connect(self.path) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE lectures
+                SET status = 'cancelled',
+                    reminder_status = CASE
+                        WHEN reminder_status IN ('pending', 'sending') THEN 'cancelled'
+                        ELSE reminder_status
+                    END,
+                    updated_at = ?
+                WHERE lecture_id = ?
+                """,
+                (now, lecture_id),
+            )
+            if cursor.rowcount == 0:
+                return None
+        return self.get(lecture_id)
+
+    def delete(self, lecture_id: str) -> bool:
+        with sqlite3.connect(self.path) as connection:
+            cursor = connection.execute(
+                "DELETE FROM lectures WHERE lecture_id = ?",
+                (lecture_id,),
+            )
+            return cursor.rowcount > 0
+
+    def set_announcement_message(self, lecture_id: str, message_id: int) -> None:
+        with sqlite3.connect(self.path) as connection:
+            connection.execute(
+                """
+                UPDATE lectures
+                SET announcement_message_id = ?, updated_at = ?
+                WHERE lecture_id = ?
+                """,
+                (str(message_id), self._now().isoformat(), lecture_id),
+            )
+
+    def claim_due(self, now: datetime | None = None) -> list[dict[str, Any]]:
+        """Claim lecture reminders that are due, expiring ones that already started."""
+        now = (now or self._now()).astimezone(timezone.utc)
+        iso = now.isoformat()
+        with sqlite3.connect(self.path) as connection:
+            connection.row_factory = sqlite3.Row
+            connection.execute("BEGIN IMMEDIATE")
+            # A reminder only makes sense before the lecture starts; anything that
+            # already began (e.g. while the bot was restarting) is expired instead.
+            connection.execute(
+                """
+                UPDATE lectures
+                SET reminder_status = 'expired', updated_at = ?
+                WHERE status = 'scheduled'
+                  AND reminder_status IN ('pending', 'sending')
+                  AND starts_at <= ?
+                """,
+                (iso, iso),
+            )
+            rows = connection.execute(
+                """
+                SELECT * FROM lectures
+                WHERE status = 'scheduled'
+                  AND reminder_status = 'pending'
+                  AND reminder_due_at <= ?
+                  AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+                ORDER BY reminder_due_at
+                """,
+                (iso, iso),
+            ).fetchall()
+            if rows:
+                connection.executemany(
+                    """
+                    UPDATE lectures
+                    SET reminder_status = 'sending', updated_at = ?
+                    WHERE lecture_id = ? AND reminder_status = 'pending'
+                    """,
+                    [(iso, row["lecture_id"]) for row in rows],
+                )
+            return [dict(row) for row in rows]
+
+    def mark_reminder_sent(self, lecture_id: str, message_id: int) -> None:
+        now = self._now().isoformat()
+        with sqlite3.connect(self.path) as connection:
+            connection.execute(
+                """
+                UPDATE lectures
+                SET reminder_status = 'sent', reminder_message_id = ?,
+                    reminder_sent_at = ?, last_error = NULL, updated_at = ?
+                WHERE lecture_id = ? AND reminder_status = 'sending'
+                """,
+                (str(message_id), now, now, lecture_id),
+            )
+
+    def release_reminder(
+        self,
+        lecture_id: str,
+        error: str,
+        retry_seconds: float = 60.0,
+        now: datetime | None = None,
+    ) -> None:
+        """Return a failed reminder to pending so it is retried before the start."""
+        now = (now or self._now()).astimezone(timezone.utc)
+        with sqlite3.connect(self.path) as connection:
+            connection.execute(
+                """
+                UPDATE lectures
+                SET reminder_status = 'pending',
+                    reminder_attempts = reminder_attempts + 1,
+                    next_attempt_at = ?,
+                    last_error = ?,
+                    updated_at = ?
+                WHERE lecture_id = ? AND reminder_status = 'sending'
+                """,
+                (
+                    (now + timedelta(seconds=retry_seconds)).isoformat(),
+                    (error or "")[:500],
+                    now.isoformat(),
+                    lecture_id,
+                ),
+            )
+
+    def expire_reminder(self, lecture_id: str, error: str) -> None:
+        """Give up on a reminder that cannot be delivered (permanent failure)."""
+        with sqlite3.connect(self.path) as connection:
+            connection.execute(
+                """
+                UPDATE lectures
+                SET reminder_status = 'expired',
+                    reminder_attempts = reminder_attempts + 1,
+                    next_attempt_at = NULL,
+                    last_error = ?,
+                    updated_at = ?
+                WHERE lecture_id = ? AND reminder_status = 'sending'
+                """,
+                ((error or "")[:500], self._now().isoformat(), lecture_id),
+            )
 
     @staticmethod
     def _now() -> datetime:
