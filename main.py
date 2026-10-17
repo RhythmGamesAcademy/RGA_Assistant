@@ -83,6 +83,14 @@ def build_operations_reminder_message(
     )
 
 
+def build_mention(role_id: int | None, user_id: int | None) -> str | None:
+    if role_id is not None:
+        return f"<@&{role_id}>"
+    if user_id is not None:
+        return f"<@{user_id}>"
+    return None
+
+
 def build_failure_notification(
     guild_id: str,
     channel_id: str,
@@ -332,10 +340,9 @@ class RGAAssistant(discord.Client):
         opened_at = datetime.fromisoformat(delivery["opened_at"])
         days = elapsed_days(opened_at)
         if target == "operations":
-            mention = None
             role_id = self.config.operations_mention_role_id
-            if role_id is not None:
-                mention = f"<@&{role_id}>"
+            user_id = self.config.operations_mention_user_id
+            mention = build_mention(role_id, user_id)
             message = build_operations_reminder_message(
                 delivery["channel_name"],
                 opened_at,
@@ -344,11 +351,16 @@ class RGAAssistant(discord.Client):
                 delivery["channel_id"],
                 mention,
             )
-            allowed_mentions = (
-                discord.AllowedMentions(roles=[discord.Object(id=role_id)])
-                if role_id is not None
-                else discord.AllowedMentions.none()
-            )
+            if role_id is not None:
+                allowed_mentions = discord.AllowedMentions(
+                    roles=[discord.Object(id=role_id)]
+                )
+            elif user_id is not None:
+                allowed_mentions = discord.AllowedMentions(
+                    users=[discord.Object(id=user_id)]
+                )
+            else:
+                allowed_mentions = discord.AllowedMentions.none()
         else:
             message = build_ticket_reminder_message(
                 delivery["channel_name"],

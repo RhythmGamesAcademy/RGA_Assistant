@@ -41,7 +41,8 @@ fail if run from another directory.
   default `days`); `RGA_DATABASE_PATH` (default `data/rga_assistant.sqlite3`).
 - Destination: `RGA_REMINDER_TARGET` (`ticket` default | `operations` | `both`),
   `RGA_OPERATIONS_CHANNEL_ID` (required for `operations`/`both`; also the failure
-  notification target), `RGA_OPERATIONS_MENTION_ROLE_ID`.
+  notification target), `RGA_OPERATIONS_MENTION_ROLE_ID` or
+  `RGA_OPERATIONS_MENTION_USER_ID` (mutually exclusive).
 - Retry policy: `RGA_RETRY_BASE_SECONDS` (60), `RGA_RETRY_MAX_SECONDS` (21600),
   `RGA_RETRY_MAX_ATTEMPTS` (6).
 - `RGA_REOPEN_TRIGGER_TEXT` (empty = disabled) is the interim reopen detector.
