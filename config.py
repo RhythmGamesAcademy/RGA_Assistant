@@ -62,6 +62,14 @@ def parse_positive_int(value: str, setting_name: str) -> int:
     return parsed
 
 
+def validate_mention_targets(role_id: int | None, user_id: int | None) -> None:
+    if role_id is not None and user_id is not None:
+        raise ValueError(
+            "Set either RGA_OPERATIONS_MENTION_ROLE_ID or "
+            "RGA_OPERATIONS_MENTION_USER_ID, not both."
+        )
+
+
 REMINDER_UNITS_IN_SECONDS = {
     "seconds": 1,
     "minutes": 60,
@@ -109,6 +117,7 @@ class Config:
     reminder_targets: Tuple[str, ...]
     operations_channel_id: int | None
     operations_mention_role_id: int | None
+    operations_mention_user_id: int | None
     retry_base_seconds: float
     retry_max_seconds: float
     retry_max_attempts: int
@@ -177,6 +186,11 @@ def load_config() -> Config:
         os.getenv("RGA_OPERATIONS_MENTION_ROLE_ID", ""),
         "RGA_OPERATIONS_MENTION_ROLE_ID",
     )
+    operations_mention_user_id = parse_optional_id(
+        os.getenv("RGA_OPERATIONS_MENTION_USER_ID", ""),
+        "RGA_OPERATIONS_MENTION_USER_ID",
+    )
+    validate_mention_targets(operations_mention_role_id, operations_mention_user_id)
 
     retry_base_seconds = parse_positive_float(
         os.getenv("RGA_RETRY_BASE_SECONDS", "60"),
@@ -202,6 +216,7 @@ def load_config() -> Config:
         reminder_targets=reminder_targets,
         operations_channel_id=operations_channel_id,
         operations_mention_role_id=operations_mention_role_id,
+        operations_mention_user_id=operations_mention_user_id,
         retry_base_seconds=retry_base_seconds,
         retry_max_seconds=retry_max_seconds,
         retry_max_attempts=retry_max_attempts,

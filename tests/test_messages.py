@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 from main import (
     build_failure_notification,
+    build_mention,
     build_operations_reminder_message,
     build_ticket_reminder_message,
     elapsed_days,
@@ -19,6 +20,20 @@ class ElapsedDaysTests(unittest.TestCase):
     def test_matches_full_interval(self) -> None:
         now = OPENED_AT.astimezone(timezone.utc) + timedelta(days=14)
         self.assertEqual(elapsed_days(OPENED_AT, now), 14)
+
+
+class MentionBuilderTests(unittest.TestCase):
+    def test_role_mention(self) -> None:
+        self.assertEqual(build_mention(99, None), "<@&99>")
+
+    def test_user_mention(self) -> None:
+        self.assertEqual(build_mention(None, 42), "<@42>")
+
+    def test_role_takes_precedence_if_both_provided(self) -> None:
+        self.assertEqual(build_mention(99, 42), "<@&99>")
+
+    def test_no_mention_when_unset(self) -> None:
+        self.assertIsNone(build_mention(None, None))
 
 
 class MessageBuilderTests(unittest.TestCase):

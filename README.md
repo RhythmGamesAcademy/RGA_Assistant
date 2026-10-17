@@ -33,6 +33,7 @@ Botを再起動してください。
 | `RGA_REMINDER_TARGET` | | `ticket` | 送信先。`ticket`/`operations`/`both`。 |
 | `RGA_OPERATIONS_CHANNEL_ID` | △ | 空 | 運営用チャンネルID。`operations`/`both`では必須。失敗通知先も兼ねます。 |
 | `RGA_OPERATIONS_MENTION_ROLE_ID` | | 空 | 運営向け通知でメンションするロールID。 |
+| `RGA_OPERATIONS_MENTION_USER_ID` | | 空 | 運営向け通知でメンションするユーザーID。`RGA_OPERATIONS_MENTION_ROLE_ID` とは併用できません。 |
 | `RGA_REOPEN_TRIGGER_TEXT` | | 空 | 再オープンとして扱う完全一致のメッセージ本文。空なら無効。 |
 | `RGA_RETRY_BASE_SECONDS` | | `60` | 送信失敗時の再試行間隔の基準（秒）。 |
 | `RGA_RETRY_MAX_SECONDS` | | `21600` | 再試行間隔の上限（秒、既定6時間）。 |
@@ -112,8 +113,9 @@ python -m tools.retry --list     # 失敗状態を一覧表示
 
 運営用チャンネルへ送信する場合は、`RGA_OPERATIONS_CHANNEL_ID` にチャンネルIDを
 設定し、`RGA_REMINDER_TARGET` を `operations` または `both` にします。
-ロールをメンションする場合は `RGA_OPERATIONS_MENTION_ROLE_ID` にロールIDを
-設定します。メンションは運営向け通知にのみ付与されます。
+メンションする場合は `RGA_OPERATIONS_MENTION_ROLE_ID`（ロール）または
+`RGA_OPERATIONS_MENTION_USER_ID`（ユーザー）のどちらかを設定します。両方は
+設定できません。メンションは運営向け通知にのみ付与されます。
 
 ## Ticket Toolとの連携設定
 
@@ -177,6 +179,7 @@ sqlite3 data/rga_assistant.sqlite3 ".backup 'backup.sqlite3'"
 | 起動時に `Message Content Intent を有効にしてください。` | Developer Portalで Message Content Intent を有効化し、再起動します。 |
 | `RGA_TICKET_CATEGORY_IDS ... must contain valid values.` | カテゴリIDが正の整数のカンマ区切りか確認します。 |
 | `RGA_OPERATIONS_CHANNEL_ID is required ...` | `RGA_REMINDER_TARGET` が `operations`/`both` のときは運営チャンネルIDを設定します。 |
+| `Set either RGA_OPERATIONS_MENTION_ROLE_ID or ...` | メンションはロールかユーザーのどちらか一方だけを設定します。 |
 | リマインダーが送信されない | Botに「チャンネルを見る」「メッセージを送信」権限があるか確認します。`error` 状態なら `python -m tools.retry` で復旧します。 |
 | クローズしたのに通知が来る | `RGA_REMINDER_TRIGGER_TEXT` がクローズ時メッセージと完全一致しているか確認します。 |
 

@@ -9,6 +9,7 @@ from config import (
     parse_positive_int,
     parse_reminder_after,
     parse_reminder_targets,
+    validate_mention_targets,
 )
 
 
@@ -50,6 +51,17 @@ class ReminderTargetConfigTests(unittest.TestCase):
     def test_rejects_unknown_target(self) -> None:
         with self.assertRaises(ValueError):
             parse_reminder_targets("everywhere")
+
+
+class MentionTargetConfigTests(unittest.TestCase):
+    def test_accepts_role_only_user_only_or_neither(self) -> None:
+        validate_mention_targets(123, None)
+        validate_mention_targets(None, 456)
+        validate_mention_targets(None, None)
+
+    def test_rejects_setting_both_role_and_user(self) -> None:
+        with self.assertRaises(ValueError):
+            validate_mention_targets(123, 456)
 
 
 class OptionalIdConfigTests(unittest.TestCase):
