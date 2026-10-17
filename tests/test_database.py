@@ -174,32 +174,6 @@ class MultiTargetReminderTests(unittest.TestCase):
             self.database.get_delivery("10", "operations")["status"], "cancelled"
         )
 
-    def test_reopen_restarts_the_window(self) -> None:
-        self.database.register(10, 20, "ticket-10", OPENED_AT)
-        self.database.claim_due(OPENED_AT + timedelta(days=14))
-        self.database.mark_delivery_sent("10", "ticket")
-        self.database.mark_delivery_sent("10", "operations")
-        self.assertEqual(self.database.get_reminder("10")["status"], "sent")
-
-        reopened_at = OPENED_AT + timedelta(days=30)
-        self.assertTrue(self.database.reopen(10, reopened_at))
-
-        reminder = self.database.get_reminder("10")
-        self.assertEqual(reminder["status"], "pending")
-        self.assertEqual(reminder["opened_at"], reopened_at.isoformat())
-        self.assertEqual(
-            reminder["due_at"],
-            (reopened_at + timedelta(days=14)).isoformat(),
-        )
-        self.assertEqual(self.database.get_delivery("10", "ticket")["status"], "pending")
-        self.assertEqual(
-            self.database.get_delivery("10", "ticket")["attempts"], 0
-        )
-
-    def test_reopen_ignores_pending_reminders(self) -> None:
-        self.database.register(10, 20, "ticket-10", OPENED_AT)
-        self.assertFalse(self.database.reopen(10, OPENED_AT + timedelta(days=1)))
-
 
 class MigrationTests(unittest.TestCase):
     def setUp(self) -> None:

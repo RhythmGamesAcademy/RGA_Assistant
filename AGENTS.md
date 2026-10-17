@@ -45,7 +45,6 @@ fail if run from another directory.
   `RGA_OPERATIONS_MENTION_USER_ID` (mutually exclusive).
 - Retry policy: `RGA_RETRY_BASE_SECONDS` (60), `RGA_RETRY_MAX_SECONDS` (21600),
   `RGA_RETRY_MAX_ATTEMPTS` (6).
-- `RGA_REOPEN_TRIGGER_TEXT` (empty = disabled) is the interim reopen detector.
 - Legacy vars still read: `RGA_TICKET_CATEGORY_ID`, `RGA_REMINDER_DAYS`.
 - Invalid config exits with a message. Discord **Message Content Intent** must be
   enabled in the Developer Portal, otherwise `client.run` raises
@@ -74,10 +73,9 @@ fail if run from another directory.
   `RGA_REMINDER_TARGET` only affects newly registered tickets.
 - `register` is `INSERT OR IGNORE`: re-registering an existing channel
   (cancelled, sent, or pending) does NOT create or restore a reminder. This is
-  load-bearing for the startup/rescan paths. `reopen()` is the explicit path that
-  resets `opened_at`/`due_at` and rebuilds deliveries.
+  load-bearing for the startup/rescan paths. There is **no reopen support**: a
+  closed ticket is not reopened; a new ticket is expected instead.
 - `reminder_loop` ticks every 5s, so sends can be up to ~5s late.
 - An exact, case-sensitive match of `RGA_REMINDER_TRIGGER_TEXT` cancels the
-  pending reminder; the same match on `RGA_REOPEN_TRIGGER_TEXT` reopens it. Bot
-  messages and partial matches are ignored.
+  pending reminder; bot messages and partial matches are ignored.
 - User-facing strings, README, and spec are Japanese — keep them Japanese.
