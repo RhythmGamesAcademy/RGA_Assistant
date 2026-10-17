@@ -8,7 +8,13 @@ from discord.ext import tasks
 
 from config import Config, load_config
 from database import LectureDatabase, ReminderDatabase
-from embeds import COLOR_INFO
+from embeds import (
+    COLOR_ERROR,
+    COLOR_INFO,
+    COLOR_REMINDER,
+    MAX_FIELD_VALUE,
+    truncate,
+)
 from lecture import LectureCommands, LectureScheduler
 
 JST = timezone(timedelta(hours=9), name="JST")
@@ -47,43 +53,63 @@ def elapsed_days(opened_at: datetime, now: datetime | None = None) -> int:
     return (now - opened_at.astimezone(timezone.utc)).days
 
 
-def build_ticket_reminder_message(
+def build_ticket_reminder_embed(
     channel_name: str,
     opened_at: datetime,
     days: int,
     guild_id: str,
     channel_id: str,
-) -> str:
+) -> discord.Embed:
     opened_at_jst = opened_at.astimezone(JST)
-    return (
-        "**チケット確認リマインダー**\n\n"
-        f"チケット **{discord.utils.escape_markdown(channel_name)}** "
-        f"の開設から{days}日が経過しました。\n"
-        "もし申請をしているのにも関わらず、この文章が送られた場合は、「審査をお願いします。」という文章が読み取れなかった場合があります。お問い合わせください。"
-        "申請者は、もし申請を取り下げる場合、Endというボタンを押してください。\n\n"
-        f"開設日時：{opened_at_jst:%Y/%m/%d %H:%M} JST\n"
-        f"チケット：https://discord.com/channels/{guild_id}/{channel_id}"
+    embed = discord.Embed(
+        title="チケット確認リマインダー",
+        description=(
+            f"チケット **{discord.utils.escape_markdown(channel_name)}** "
+            f"の開設から{days}日が経過しました。\n"
+            "もし申請をしているのにも関わらず、この文章が送られた場合は、"
+            "「審査をお願いします。」という文章が読み取れなかった場合があります。"
+            "お問い合わせください。"
+            "申請者は、もし申請を取り下げる場合、Endというボタンを押してください。"
+        ),
+        color=COLOR_REMINDER,
     )
+    embed.add_field(
+        name="開設日時", value=f"{opened_at_jst:%Y/%m/%d %H:%M} JST", inline=False
+    )
+    embed.add_field(
+        name="チケット",
+        value=f"https://discord.com/channels/{guild_id}/{channel_id}",
+        inline=False,
+    )
+    return embed
 
 
-def build_operations_reminder_message(
+def build_operations_reminder_embed(
     channel_name: str,
     opened_at: datetime,
     days: int,
     guild_id: str,
     channel_id: str,
-    mention: str | None = None,
-) -> str:
+) -> discord.Embed:
     opened_at_jst = opened_at.astimezone(JST)
-    prefix = f"{mention}\n" if mention else ""
-    return (
-        f"{prefix}**チケット確認リマインダー**\n\n"
-        f"チケット **{discord.utils.escape_markdown(channel_name)}** "
-        f"の開設から{days}日が経過しました。\n\n"
-        "対応状況を確認してください。\n\n"
-        f"開設日時：{opened_at_jst:%Y/%m/%d %H:%M} JST\n"
-        f"チケット：https://discord.com/channels/{guild_id}/{channel_id}"
+    embed = discord.Embed(
+        title="チケット確認リマインダー",
+        description=(
+            f"チケット **{discord.utils.escape_markdown(channel_name)}** "
+            f"の開設から{days}日が経過しました。\n\n"
+            "対応状況を確認してください。"
+        ),
+        color=COLOR_REMINDER,
     )
+    embed.add_field(
+        name="開設日時", value=f"{opened_at_jst:%Y/%m/%d %H:%M} JST", inline=False
+    )
+    embed.add_field(
+        name="チケット",
+        value=f"https://discord.com/channels/{guild_id}/{channel_id}",
+        inline=False,
+    )
+    return embed
 
 
 def build_mention(role_id: int | None, user_id: int | None) -> str | None:
@@ -94,21 +120,26 @@ def build_mention(role_id: int | None, user_id: int | None) -> str | None:
     return None
 
 
-def build_failure_notification(
+def build_failure_notification_embed(
     guild_id: str,
     channel_id: str,
     target: str,
     attempts: int,
     error: str,
-) -> str:
-    return (
-        "**チケットリマインダー送信失敗**\n\n"
-        f"チャンネル：https://discord.com/channels/{guild_id}/{channel_id}\n"
-        f"送信先：{target}\n"
-        f"試行回数：{attempts}\n"
-        f"理由：{error}\n\n"
-        "`python -m tools.retry` で再試行対象に戻せます。"
+) -> discord.Embed:
+    embed = discord.Embed(title="チケットリマインダー送信失敗", color=COLOR_ERROR)
+    embed.add_field(
+        name="チャンネル",
+        value=f"https://discord.com/channels/{guild_id}/{channel_id}",
+        inline=False,
     )
+    embed.add_field(name="送信先", value=target, inline=True)
+    embed.add_field(name="試行回数", value=str(attempts), inline=True)
+    embed.add_field(
+        name="理由", value=truncate(error, MAX_FIELD_VALUE) or "-", inline=False
+    )
+    embed.set_footer(text="`python -m tools.retry` で再試行対象に戻せます。")
+    return embed
 
 
 def build_help_embed() -> discord.Embed:
@@ -408,17 +439,17 @@ class RGAAssistant(discord.Client):
 
         opened_at = datetime.fromisoformat(delivery["opened_at"])
         days = elapsed_days(opened_at)
+        content: str | None = None
         if target == "operations":
             role_id = self.config.operations_mention_role_id
             user_id = self.config.operations_mention_user_id
-            mention = build_mention(role_id, user_id)
-            message = build_operations_reminder_message(
+            content = build_mention(role_id, user_id)
+            embed = build_operations_reminder_embed(
                 delivery["channel_name"],
                 opened_at,
                 days,
                 delivery["guild_id"],
                 delivery["channel_id"],
-                mention,
             )
             if role_id is not None:
                 allowed_mentions = discord.AllowedMentions(
@@ -431,7 +462,7 @@ class RGAAssistant(discord.Client):
             else:
                 allowed_mentions = discord.AllowedMentions.none()
         else:
-            message = build_ticket_reminder_message(
+            embed = build_ticket_reminder_embed(
                 delivery["channel_name"],
                 opened_at,
                 days,
@@ -441,7 +472,9 @@ class RGAAssistant(discord.Client):
             allowed_mentions = discord.AllowedMentions.none()
 
         try:
-            sent_message = await channel.send(message, allowed_mentions=allowed_mentions)
+            sent_message = await channel.send(
+                content=content, embed=embed, allowed_mentions=allowed_mentions
+            )
         except discord.Forbidden:
             await self._record_failure(
                 delivery, "missing permission to send message", permanent=True
@@ -507,7 +540,7 @@ class RGAAssistant(discord.Client):
             if not isinstance(channel, discord.TextChannel):
                 return
             await channel.send(
-                build_failure_notification(
+                embed=build_failure_notification_embed(
                     delivery["guild_id"],
                     delivery["channel_id"],
                     delivery["target"],

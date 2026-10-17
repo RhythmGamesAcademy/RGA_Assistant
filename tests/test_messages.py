@@ -1,15 +1,26 @@
 import unittest
 from datetime import datetime, timedelta, timezone
 
+import discord
+
 from main import (
-    build_failure_notification,
+    build_failure_notification_embed,
     build_mention,
-    build_operations_reminder_message,
-    build_ticket_reminder_message,
+    build_operations_reminder_embed,
+    build_ticket_reminder_embed,
     elapsed_days,
 )
 
 OPENED_AT = datetime(2026, 10, 1, 15, 0, tzinfo=timezone(timedelta(hours=9)))
+
+
+def embed_text(embed: discord.Embed) -> str:
+    parts = [embed.title or "", embed.description or ""]
+    if embed.footer.text:
+        parts.append(embed.footer.text)
+    for field in embed.fields:
+        parts += [field.name, field.value]
+    return "\n".join(parts)
 
 
 class ElapsedDaysTests(unittest.TestCase):
@@ -36,31 +47,29 @@ class MentionBuilderTests(unittest.TestCase):
         self.assertIsNone(build_mention(None, None))
 
 
-class MessageBuilderTests(unittest.TestCase):
-    def test_ticket_message_contains_link_and_jst_timestamp(self) -> None:
-        message = build_ticket_reminder_message("ticket-10", OPENED_AT, 14, "20", "10")
-        self.assertIn("チケット確認リマインダー", message)
-        self.assertIn("https://discord.com/channels/20/10", message)
-        self.assertIn("2026/10/01 15:00 JST", message)
-        self.assertIn("14日", message)
+class TicketEmbedTests(unittest.TestCase):
+    def test_ticket_embed_contains_link_and_jst_timestamp(self) -> None:
+        embed = build_ticket_reminder_embed("ticket-10", OPENED_AT, 14, "20", "10")
+        text = embed_text(embed)
+        self.assertEqual(embed.title, "チケット確認リマインダー")
+        self.assertIn("https://discord.com/channels/20/10", text)
+        self.assertIn("2026/10/01 15:00 JST", text)
+        self.assertIn("14日", text)
 
-    def test_operations_message_without_mention(self) -> None:
-        message = build_operations_reminder_message("ticket-10", OPENED_AT, 14, "20", "10")
-        self.assertTrue(message.startswith("**チケット確認リマインダー**"))
-        self.assertIn("対応状況を確認してください。", message)
-        self.assertIn("https://discord.com/channels/20/10", message)
+    def test_operations_embed_asks_to_review(self) -> None:
+        embed = build_operations_reminder_embed("ticket-10", OPENED_AT, 14, "20", "10")
+        text = embed_text(embed)
+        self.assertEqual(embed.title, "チケット確認リマインダー")
+        self.assertIn("対応状況を確認してください。", text)
+        self.assertIn("https://discord.com/channels/20/10", text)
 
-    def test_operations_message_prepends_mention(self) -> None:
-        message = build_operations_reminder_message(
-            "ticket-10", OPENED_AT, 14, "20", "10", mention="<@&99>"
-        )
-        self.assertTrue(message.startswith("<@&99>\n"))
-
-    def test_failure_notification_targets_retry_tool(self) -> None:
-        message = build_failure_notification("20", "10", "ticket", 6, "boom")
-        self.assertIn("https://discord.com/channels/20/10", message)
-        self.assertIn("python -m tools.retry", message)
-        self.assertIn("boom", message)
+    def test_failure_embed_targets_retry_tool(self) -> None:
+        embed = build_failure_notification_embed("20", "10", "ticket", 6, "boom")
+        text = embed_text(embed)
+        self.assertEqual(embed.title, "チケットリマインダー送信失敗")
+        self.assertIn("https://discord.com/channels/20/10", text)
+        self.assertIn("python -m tools.retry", text)
+        self.assertIn("boom", text)
 
 
 if __name__ == "__main__":
