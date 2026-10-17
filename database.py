@@ -135,33 +135,6 @@ class ReminderDatabase:
                 self._insert_deliveries(connection, str(channel_id), now)
             return inserted
 
-    def reopen(self, channel_id: int, opened_at: datetime) -> bool:
-        opened_at = opened_at.astimezone(timezone.utc)
-        now = self._now().isoformat()
-        with sqlite3.connect(self.path) as connection:
-            cursor = connection.execute(
-                """
-                UPDATE ticket_reminders
-                SET opened_at = ?, due_at = ?, status = 'pending',
-                    sent_at = NULL, updated_at = ?
-                WHERE channel_id = ? AND status IN ('sent', 'cancelled')
-                """,
-                (
-                    opened_at.isoformat(),
-                    (opened_at + self.reminder_after).isoformat(),
-                    now,
-                    str(channel_id),
-                ),
-            )
-            if cursor.rowcount == 0:
-                return False
-            connection.execute(
-                "DELETE FROM reminder_deliveries WHERE channel_id = ?",
-                (str(channel_id),),
-            )
-            self._insert_deliveries(connection, str(channel_id), now)
-            return True
-
     def cancel(self, channel_id: int) -> bool:
         now = self._now().isoformat()
         with sqlite3.connect(self.path) as connection:

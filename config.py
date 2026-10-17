@@ -112,7 +112,6 @@ class Config:
     ticket_category_ids: Tuple[int, ...]
     excluded_channel_ids: Tuple[int, ...]
     reminder_trigger_text: str
-    reopen_trigger_text: str
     reminder_after: timedelta
     reminder_targets: Tuple[str, ...]
     operations_channel_id: int | None
@@ -211,7 +210,6 @@ def load_config() -> Config:
         ticket_category_ids=category_ids,
         excluded_channel_ids=excluded_channel_ids,
         reminder_trigger_text=trigger_text,
-        reopen_trigger_text=os.getenv("RGA_REOPEN_TRIGGER_TEXT", "").strip(),
         reminder_after=reminder_after,
         reminder_targets=reminder_targets,
         operations_channel_id=operations_channel_id,

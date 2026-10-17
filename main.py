@@ -199,15 +199,6 @@ class RGAAssistant(discord.Client):
                 )
             return
 
-        if self.config.reopen_trigger_text and self._matches_trigger(
-            message, self.config.reopen_trigger_text
-        ):
-            if self.database.reopen(message.channel.id, message.created_at):
-                logger.info(
-                    "Reopened ticket reminder after trigger text in channel %s",
-                    message.channel.id,
-                )
-
     def _matches_trigger(self, message: discord.Message, trigger_text: str) -> bool:
         return is_reminder_cancel_message(
             message.content,
