@@ -1,0 +1,17 @@
+[Unit]
+Description=RGA Assistant Discord bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/rga-assistant
+EnvironmentFile=/opt/rga-assistant/.env
+ExecStart=/opt/rga-assistant/.venv/bin/python main.py
+Restart=always
+RestartSec=5
+User=rga
+Group=rga
+
+[Install]
+WantedBy=multi-user.target
