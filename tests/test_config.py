@@ -1,7 +1,15 @@
 import unittest
 from datetime import timedelta
 
-from config import parse_category_ids, parse_discord_ids, parse_reminder_after
+from config import (
+    parse_category_ids,
+    parse_discord_ids,
+    parse_optional_id,
+    parse_positive_float,
+    parse_positive_int,
+    parse_reminder_after,
+    parse_reminder_targets,
+)
 
 
 class ReminderIntervalConfigTests(unittest.TestCase):
@@ -31,6 +39,42 @@ class CategoryIdConfigTests(unittest.TestCase):
         for value in ("", "10,nope", "0", "-2"):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 parse_category_ids(value)
+
+
+class ReminderTargetConfigTests(unittest.TestCase):
+    def test_maps_target_names_to_delivery_targets(self) -> None:
+        self.assertEqual(parse_reminder_targets("ticket"), ("ticket",))
+        self.assertEqual(parse_reminder_targets("operations"), ("operations",))
+        self.assertEqual(parse_reminder_targets("BOTH"), ("ticket", "operations"))
+
+    def test_rejects_unknown_target(self) -> None:
+        with self.assertRaises(ValueError):
+            parse_reminder_targets("everywhere")
+
+
+class OptionalIdConfigTests(unittest.TestCase):
+    def test_parses_present_and_absent_ids(self) -> None:
+        self.assertEqual(parse_optional_id("123", "RGA_X"), 123)
+        self.assertIsNone(parse_optional_id("", "RGA_X"))
+
+    def test_rejects_invalid_ids(self) -> None:
+        for value in ("abc", "0", "-1"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                parse_optional_id(value, "RGA_X")
+
+
+class RetryConfigTests(unittest.TestCase):
+    def test_parses_positive_values(self) -> None:
+        self.assertEqual(parse_positive_float("60", "RGA_X"), 60.0)
+        self.assertEqual(parse_positive_int("6", "RGA_X"), 6)
+
+    def test_rejects_nonpositive_or_invalid_values(self) -> None:
+        for value in ("0", "-5", "abc"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                parse_positive_float(value, "RGA_X")
+        for value in ("0", "-5", "abc"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                parse_positive_int(value, "RGA_X")
 
 
 class ExcludedChannelConfigTests(unittest.TestCase):

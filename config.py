@@ -29,6 +29,39 @@ def parse_category_ids(value: str) -> Tuple[int, ...]:
     return parse_discord_ids(value, "Category IDs")
 
 
+def parse_optional_id(value: str, setting_name: str) -> int | None:
+    value = value.strip()
+    if not value:
+        return None
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise ValueError(f"{setting_name} must be a Discord ID.") from exc
+    if parsed <= 0:
+        raise ValueError(f"{setting_name} must be a positive Discord ID.")
+    return parsed
+
+
+def parse_positive_float(value: str, setting_name: str) -> float:
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise ValueError(f"{setting_name} must be a number.") from exc
+    if parsed <= 0:
+        raise ValueError(f"{setting_name} must be positive.")
+    return parsed
+
+
+def parse_positive_int(value: str, setting_name: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise ValueError(f"{setting_name} must be an integer.") from exc
+    if parsed <= 0:
+        raise ValueError(f"{setting_name} must be positive.")
+    return parsed
+
+
 REMINDER_UNITS_IN_SECONDS = {
     "seconds": 1,
     "minutes": 60,
@@ -49,13 +82,36 @@ def parse_reminder_after(value: int, unit: str) -> timedelta:
     return timedelta(seconds=value * seconds_per_unit)
 
 
+REMINDER_TARGETS = {
+    "ticket": ("ticket",),
+    "operations": ("operations",),
+    "both": ("ticket", "operations"),
+}
+
+
+def parse_reminder_targets(value: str) -> Tuple[str, ...]:
+    normalized = value.strip().lower()
+    targets = REMINDER_TARGETS.get(normalized)
+    if targets is None:
+        choices = ", ".join(REMINDER_TARGETS)
+        raise ValueError(f"RGA_REMINDER_TARGET must be one of: {choices}.")
+    return targets
+
+
 @dataclass(frozen=True)
 class Config:
     discord_token: str
     ticket_category_ids: Tuple[int, ...]
     excluded_channel_ids: Tuple[int, ...]
     reminder_trigger_text: str
+    reopen_trigger_text: str
     reminder_after: timedelta
+    reminder_targets: Tuple[str, ...]
+    operations_channel_id: int | None
+    operations_mention_role_id: int | None
+    retry_base_seconds: float
+    retry_max_seconds: float
+    retry_max_attempts: int
     database_path: Path
 
 
@@ -105,12 +161,49 @@ def load_config() -> Config:
     except ValueError as exc:
         raise ValueError(str(exc)) from exc
 
+    reminder_targets = parse_reminder_targets(
+        os.getenv("RGA_REMINDER_TARGET", "ticket")
+    )
+    operations_channel_id = parse_optional_id(
+        os.getenv("RGA_OPERATIONS_CHANNEL_ID", ""),
+        "RGA_OPERATIONS_CHANNEL_ID",
+    )
+    if "operations" in reminder_targets and operations_channel_id is None:
+        raise ValueError(
+            "RGA_OPERATIONS_CHANNEL_ID is required when RGA_REMINDER_TARGET is "
+            "operations or both."
+        )
+    operations_mention_role_id = parse_optional_id(
+        os.getenv("RGA_OPERATIONS_MENTION_ROLE_ID", ""),
+        "RGA_OPERATIONS_MENTION_ROLE_ID",
+    )
+
+    retry_base_seconds = parse_positive_float(
+        os.getenv("RGA_RETRY_BASE_SECONDS", "60"),
+        "RGA_RETRY_BASE_SECONDS",
+    )
+    retry_max_seconds = parse_positive_float(
+        os.getenv("RGA_RETRY_MAX_SECONDS", "21600"),
+        "RGA_RETRY_MAX_SECONDS",
+    )
+    retry_max_attempts = parse_positive_int(
+        os.getenv("RGA_RETRY_MAX_ATTEMPTS", "6"),
+        "RGA_RETRY_MAX_ATTEMPTS",
+    )
+
     database_path = Path(os.getenv("RGA_DATABASE_PATH", "data/rga_assistant.sqlite3"))
     return Config(
         discord_token=token,
         ticket_category_ids=category_ids,
         excluded_channel_ids=excluded_channel_ids,
         reminder_trigger_text=trigger_text,
+        reopen_trigger_text=os.getenv("RGA_REOPEN_TRIGGER_TEXT", "").strip(),
         reminder_after=reminder_after,
+        reminder_targets=reminder_targets,
+        operations_channel_id=operations_channel_id,
+        operations_mention_role_id=operations_mention_role_id,
+        retry_base_seconds=retry_base_seconds,
+        retry_max_seconds=retry_max_seconds,
+        retry_max_attempts=retry_max_attempts,
         database_path=database_path,
     )
