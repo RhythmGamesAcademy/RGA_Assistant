@@ -226,6 +226,26 @@ class LectureDatabaseTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(await restarted.claim_due(DUE_AT)), 1)
 
+    async def test_purge_old_removes_only_finished_lectures(self) -> None:
+        done = await self._create()
+        await self.database.claim_due(DUE_AT)
+        await self.database.mark_reminder_sent(done["lecture_id"], 555)
+        cancelled = await self._create(starts_at=STARTS_AT + timedelta(days=1))
+        await self.database.cancel(cancelled["lecture_id"])
+        pending = await self._create(starts_at=STARTS_AT + timedelta(days=2))
+
+        cutoff = datetime.now(timezone.utc) + timedelta(days=1)
+        self.assertEqual(await self.database.count_purgeable(cutoff), 2)
+        # A cutoff in the past leaves every row in place.
+        self.assertEqual(
+            await self.database.purge_old(STARTS_AT - timedelta(days=365)), 0
+        )
+
+        self.assertEqual(await self.database.purge_old(cutoff), 2)
+        self.assertIsNone(await self.database.get(done["lecture_id"]))
+        self.assertIsNone(await self.database.get(cancelled["lecture_id"]))
+        self.assertIsNotNone(await self.database.get(pending["lecture_id"]))
+
 
 if __name__ == "__main__":
     unittest.main()

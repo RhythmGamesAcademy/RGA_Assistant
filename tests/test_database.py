@@ -167,6 +167,23 @@ class ReminderDatabaseTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual((status, attempts), ("error", 1))
 
+    async def test_purge_old_removes_only_terminal_reminders(self) -> None:
+        database = self.make_database()
+        await database.register(10, 20, "ticket-10", OPENED_AT)
+        await database.claim_due(OPENED_AT + timedelta(days=14))
+        await database.mark_delivery_sent("10", "ticket")
+        await database.register(11, 20, "ticket-11", OPENED_AT)  # stays pending
+
+        cutoff = datetime.now(timezone.utc) + timedelta(days=1)
+        self.assertEqual(await database.count_purgeable(cutoff), 1)
+        # A cutoff in the past leaves every row in place.
+        self.assertEqual(await database.purge_old(OPENED_AT), 0)
+
+        self.assertEqual(await database.purge_old(cutoff), 1)
+        self.assertIsNone(await database.get_reminder("10"))
+        self.assertIsNone(await database.get_delivery("10", "ticket"))
+        self.assertIsNotNone(await database.get_reminder("11"))
+
 
 @requires_database
 class MultiTargetReminderTests(unittest.IsolatedAsyncioTestCase):

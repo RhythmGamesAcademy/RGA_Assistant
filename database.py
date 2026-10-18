@@ -154,6 +154,11 @@ class ReminderDatabase:
         self.retry_max_seconds = retry_max_seconds
         self.retry_max_attempts = retry_max_attempts
 
+    async def ensure_schema(self) -> None:
+        """Create the schema without touching any stored state."""
+        async with self.pool.connection() as connection:
+            await _create_schema(connection, self._now())
+
     async def initialize(self) -> None:
         async with self.pool.connection() as connection:
             await _create_schema(connection, self._now())
@@ -405,6 +410,36 @@ class ReminderDatabase:
             )
             return await cursor.fetchone()
 
+    async def count_purgeable(self, before: datetime) -> int:
+        """Count terminal reminders last updated before ``before``."""
+        async with self.pool.connection() as connection:
+            cursor = await connection.execute(
+                """
+                SELECT count(*) AS count FROM ticket_reminders
+                WHERE status IN ('sent', 'cancelled') AND updated_at < %s
+                """,
+                (before.astimezone(timezone.utc),),
+            )
+            row = await cursor.fetchone()
+            return int(row["count"])
+
+    async def purge_old(self, before: datetime) -> int:
+        """Delete terminal reminders last updated before ``before``.
+
+        Deliveries are removed through the ``ON DELETE CASCADE`` foreign key, so
+        only finished tickets (``sent``/``cancelled``) are affected and pending or
+        errored reminders are left for the retry tooling.
+        """
+        async with self.pool.connection() as connection:
+            cursor = await connection.execute(
+                """
+                DELETE FROM ticket_reminders
+                WHERE status IN ('sent', 'cancelled') AND updated_at < %s
+                """,
+                (before.astimezone(timezone.utc),),
+            )
+            return cursor.rowcount
+
     async def _insert_deliveries(
         self, connection: Any, channel_id: str, now: datetime
     ) -> None:
@@ -433,6 +468,11 @@ class LectureDatabase:
 
     def __init__(self, pool: AsyncConnectionPool) -> None:
         self.pool = pool
+
+    async def ensure_schema(self) -> None:
+        """Create the schema without touching any stored state."""
+        async with self.pool.connection() as connection:
+            await _create_schema(connection, self._now())
 
     async def initialize(self) -> None:
         async with self.pool.connection() as connection:
@@ -602,6 +642,40 @@ class LectureDatabase:
                 (lecture_id,),
             )
             return cursor.rowcount > 0
+
+    async def count_purgeable(self, before: datetime) -> int:
+        """Count finished lectures last updated before ``before``."""
+        async with self.pool.connection() as connection:
+            cursor = await connection.execute(
+                """
+                SELECT count(*) AS count FROM lectures
+                WHERE (status = 'cancelled'
+                       OR reminder_status IN ('sent', 'expired', 'cancelled'))
+                  AND updated_at < %s
+                """,
+                (before.astimezone(timezone.utc),),
+            )
+            row = await cursor.fetchone()
+            return int(row["count"])
+
+    async def purge_old(self, before: datetime) -> int:
+        """Delete finished lectures last updated before ``before``.
+
+        A lecture is finished once it is cancelled or its reminder reached a
+        terminal state (``sent``/``expired``/``cancelled``), so scheduled lectures
+        still waiting to be announced are never removed.
+        """
+        async with self.pool.connection() as connection:
+            cursor = await connection.execute(
+                """
+                DELETE FROM lectures
+                WHERE (status = 'cancelled'
+                       OR reminder_status IN ('sent', 'expired', 'cancelled'))
+                  AND updated_at < %s
+                """,
+                (before.astimezone(timezone.utc),),
+            )
+            return cursor.rowcount
 
     async def set_announcement_message(self, lecture_id: str, message_id: int) -> None:
         async with self.pool.connection() as connection:
