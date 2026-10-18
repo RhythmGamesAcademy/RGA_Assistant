@@ -5,33 +5,39 @@ from main import is_monitored_channel, is_reminder_cancel_message
 
 class ReminderCancellationMessageTests(unittest.TestCase):
     def test_matches_exact_message_in_configured_category(self) -> None:
-        self.assertTrue(is_reminder_cancel_message("help", 10, (10,), 100, (), "help"))
+        self.assertTrue(
+            is_reminder_cancel_message("help", 10, (10,), 100, (), ("help",))
+        )
 
     def test_ignores_other_categories(self) -> None:
-        self.assertFalse(is_reminder_cancel_message("Need help", 11, (10,), 100, (), "help"))
+        self.assertFalse(
+            is_reminder_cancel_message("Need help", 11, (10,), 100, (), ("help",))
+        )
 
     def test_matches_any_configured_category(self) -> None:
         self.assertTrue(
-            is_reminder_cancel_message("help", 20, (10, 20, 30), 100, (), "help")
+            is_reminder_cancel_message("help", 20, (10, 20, 30), 100, (), ("help",))
         )
 
     def test_ignores_categories_not_in_configured_list(self) -> None:
         self.assertFalse(
-            is_reminder_cancel_message("help", 40, (10, 20, 30), 100, (), "help")
+            is_reminder_cancel_message("help", 40, (10, 20, 30), 100, (), ("help",))
         )
 
     def test_ignores_excluded_channel_inside_configured_category(self) -> None:
         self.assertFalse(
-            is_reminder_cancel_message("help", 10, (10,), 100, (100,), "help")
+            is_reminder_cancel_message("help", 10, (10,), 100, (100,), ("help",))
         )
 
     def test_ignores_messages_that_only_contain_trigger(self) -> None:
         self.assertFalse(
-            is_reminder_cancel_message("please help", 10, (10,), 100, (), "help")
+            is_reminder_cancel_message("please help", 10, (10,), 100, (), ("help",))
         )
 
     def test_exact_match_is_case_sensitive(self) -> None:
-        self.assertFalse(is_reminder_cancel_message("Help", 10, (10,), 100, (), "help"))
+        self.assertFalse(
+            is_reminder_cancel_message("Help", 10, (10,), 100, (), ("help",))
+        )
 
 
 class MonitoredChannelTests(unittest.TestCase):
