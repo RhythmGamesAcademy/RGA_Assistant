@@ -20,10 +20,6 @@ class ReminderCancelKeywordTests(unittest.TestCase):
             is_reminder_cancel_message("終わりました", 10, (10,), 100, (), triggers)
         )
 
-    def test_single_string_still_matches(self) -> None:
-        self.assertTrue(is_reminder_cancel_message("End", 10, (10,), 100, (), "End"))
-        self.assertFalse(is_reminder_cancel_message("end", 10, (10,), 100, (), "End"))
-
 
 if __name__ == "__main__":
     unittest.main()

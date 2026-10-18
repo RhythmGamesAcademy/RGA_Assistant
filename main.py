@@ -48,10 +48,8 @@ def is_reminder_cancel_message(
     configured_category_ids: tuple[int, ...],
     channel_id: int,
     excluded_channel_ids: tuple[int, ...],
-    trigger_texts: str | tuple[str, ...],
+    trigger_texts: tuple[str, ...],
 ) -> bool:
-    if isinstance(trigger_texts, str):
-        trigger_texts = (trigger_texts,)
     return (
         channel_category_id in configured_category_ids
         and channel_id not in excluded_channel_ids
@@ -459,7 +457,7 @@ class RGAAssistant(discord.Client):
             return
 
     def _matches_trigger(
-        self, message: discord.Message, trigger_texts: str | tuple[str, ...]
+        self, message: discord.Message, trigger_texts: tuple[str, ...]
     ) -> bool:
         return is_reminder_cancel_message(
             message.content,
