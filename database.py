@@ -1,38 +1,45 @@
-import sqlite3
+import asyncio
+import logging
+import sys
 import uuid
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 2
+from psycopg.rows import dict_row
+from psycopg_pool import AsyncConnectionPool
 
-_CREATE_REMINDERS = """
+logger = logging.getLogger("rga_assistant")
+
+SCHEMA_VERSION = 1
+
+_CREATE_TICKET_REMINDERS = """
 CREATE TABLE IF NOT EXISTS ticket_reminders (
     channel_id TEXT PRIMARY KEY,
     guild_id TEXT NOT NULL,
     channel_name TEXT NOT NULL,
-    opened_at TEXT NOT NULL,
-    due_at TEXT NOT NULL,
+    opened_at TIMESTAMPTZ NOT NULL,
+    due_at TIMESTAMPTZ NOT NULL,
     status TEXT NOT NULL CHECK (
         status IN ('pending', 'sending', 'sent', 'cancelled')
     ),
-    sent_at TEXT,
-    updated_at TEXT NOT NULL
+    sent_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ NOT NULL
 )
 """
 
 _CREATE_DELIVERIES = """
 CREATE TABLE IF NOT EXISTS reminder_deliveries (
-    channel_id TEXT NOT NULL,
+    channel_id TEXT NOT NULL
+        REFERENCES ticket_reminders (channel_id) ON DELETE CASCADE,
     target TEXT NOT NULL CHECK (target IN ('ticket', 'operations')),
     status TEXT NOT NULL CHECK (
         status IN ('pending', 'sending', 'sent', 'cancelled', 'error')
     ),
     attempts INTEGER NOT NULL DEFAULT 0,
-    next_attempt_at TEXT,
+    next_attempt_at TIMESTAMPTZ,
     last_error TEXT,
-    sent_at TEXT,
-    updated_at TEXT NOT NULL,
+    sent_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ NOT NULL,
     PRIMARY KEY (channel_id, target)
 )
 """
@@ -44,38 +51,94 @@ CREATE TABLE IF NOT EXISTS lectures (
     title TEXT NOT NULL,
     lecturer TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
-    starts_at TEXT NOT NULL,
+    starts_at TIMESTAMPTZ NOT NULL,
     announce_channel_id TEXT NOT NULL,
     reminder_lead_minutes INTEGER NOT NULL,
-    reminder_due_at TEXT NOT NULL,
+    reminder_due_at TIMESTAMPTZ NOT NULL,
     status TEXT NOT NULL CHECK (status IN ('scheduled', 'cancelled')),
     reminder_status TEXT NOT NULL CHECK (
         reminder_status IN ('pending', 'sending', 'sent', 'cancelled', 'expired')
     ),
     reminder_attempts INTEGER NOT NULL DEFAULT 0,
-    next_attempt_at TEXT,
+    next_attempt_at TIMESTAMPTZ,
     last_error TEXT,
-    reminder_sent_at TEXT,
+    reminder_sent_at TIMESTAMPTZ,
     announcement_message_id TEXT,
     reminder_message_id TEXT,
     created_by TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL
 )
 """
 
+_CREATE_SCHEMA_VERSION = """
+CREATE TABLE IF NOT EXISTS schema_version (
+    id BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id),
+    version INTEGER NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL
+)
+"""
+
+_UPSERT_SCHEMA_VERSION = """
+INSERT INTO schema_version (id, version, updated_at)
+VALUES (TRUE, %s, %s)
+ON CONFLICT (id) DO UPDATE
+SET version = EXCLUDED.version, updated_at = EXCLUDED.updated_at
+WHERE schema_version.version < EXCLUDED.version
+"""
+
+
+def ensure_compatible_event_loop_policy() -> None:
+    """Select an event loop policy that psycopg's async connections support.
+
+    psycopg refuses to run on Windows' default ``ProactorEventLoop``, so this must
+    be called *before* the loop is created (``asyncio.run`` / ``Client.run``).
+    """
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+
+async def open_pool(
+    url: str,
+    min_size: int = 1,
+    max_size: int = 5,
+) -> AsyncConnectionPool:
+    pool = AsyncConnectionPool(
+        url,
+        kwargs={"row_factory": dict_row},
+        min_size=min_size,
+        max_size=max_size,
+        open=False,
+    )
+    await pool.open()
+    await pool.wait()
+    return pool
+
+
+async def _create_schema(connection: Any, now: datetime) -> None:
+    await connection.execute(_CREATE_TICKET_REMINDERS)
+    await connection.execute(_CREATE_DELIVERIES)
+    await connection.execute(_CREATE_LECTURES)
+    await connection.execute(_CREATE_SCHEMA_VERSION)
+    await connection.execute(_UPSERT_SCHEMA_VERSION, (SCHEMA_VERSION, now))
+
 
 class ReminderDatabase:
+    """PostgreSQL access layer for ticket reminders.
+
+    The connection pool is created once by the caller and shared with
+    :class:`LectureDatabase`.
+    """
+
     def __init__(
         self,
-        path: Path,
+        pool: AsyncConnectionPool,
         reminder_after: timedelta,
         targets: tuple[str, ...] = ("ticket",),
         retry_base_seconds: float = 60.0,
         retry_max_seconds: float = 21600.0,
         retry_max_attempts: int = 6,
     ) -> None:
-        self.path = path
         if reminder_after <= timedelta(0):
             raise ValueError("reminder_after must be positive.")
         if not targets:
@@ -84,56 +147,27 @@ class ReminderDatabase:
             raise ValueError("retry delays must be positive.")
         if retry_max_attempts <= 0:
             raise ValueError("retry_max_attempts must be positive.")
+        self.pool = pool
         self.reminder_after = reminder_after
         self.targets = tuple(targets)
         self.retry_base_seconds = retry_base_seconds
         self.retry_max_seconds = retry_max_seconds
         self.retry_max_attempts = retry_max_attempts
 
-    def initialize(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(self.path) as connection:
-            connection.execute(_CREATE_REMINDERS)
-            connection.execute(_CREATE_DELIVERIES)
-            connection.execute(_CREATE_LECTURES)
-            version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version < SCHEMA_VERSION:
-                self._migrate(connection, version)
-                connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+    async def initialize(self) -> None:
+        async with self.pool.connection() as connection:
+            await _create_schema(connection, self._now())
             # Stale in-flight deliveries are returned to pending after a restart.
-            connection.execute(
+            await connection.execute(
                 """
                 UPDATE reminder_deliveries
-                SET status = 'pending', updated_at = ?
+                SET status = 'pending', updated_at = %s
                 WHERE status = 'sending'
                 """,
-                (self._now().isoformat(),),
+                (self._now(),),
             )
 
-    def _migrate(self, connection: sqlite3.Connection, version: int) -> None:
-        if version < 1:
-            # Backfill a single ticket delivery for reminders created before the
-            # per-destination delivery table existed.
-            connection.execute(
-                """
-                INSERT OR IGNORE INTO reminder_deliveries
-                    (channel_id, target, status, attempts, next_attempt_at,
-                     sent_at, updated_at)
-                SELECT channel_id, 'ticket',
-                    CASE status
-                        WHEN 'sent' THEN 'sent'
-                        WHEN 'cancelled' THEN 'cancelled'
-                        ELSE 'pending'
-                    END,
-                    0, NULL, sent_at, updated_at
-                FROM ticket_reminders
-                """
-            )
-            connection.execute(
-                "UPDATE ticket_reminders SET status = 'pending' WHERE status = 'sending'"
-            )
-
-    def register(
+    async def register(
         self,
         channel_id: int,
         guild_id: int,
@@ -141,127 +175,130 @@ class ReminderDatabase:
         opened_at: datetime,
     ) -> bool:
         opened_at = opened_at.astimezone(timezone.utc)
-        now = self._now().isoformat()
-        with sqlite3.connect(self.path) as connection:
-            cursor = connection.execute(
+        now = self._now()
+        async with self.pool.connection() as connection:
+            cursor = await connection.execute(
                 """
-                INSERT OR IGNORE INTO ticket_reminders
+                INSERT INTO ticket_reminders
                     (channel_id, guild_id, channel_name, opened_at, due_at,
                      status, updated_at)
-                VALUES (?, ?, ?, ?, ?, 'pending', ?)
+                VALUES (%s, %s, %s, %s, %s, 'pending', %s)
+                ON CONFLICT (channel_id) DO NOTHING
+                RETURNING channel_id
                 """,
                 (
                     str(channel_id),
                     str(guild_id),
                     channel_name,
-                    opened_at.isoformat(),
-                    (opened_at + self.reminder_after).isoformat(),
+                    opened_at,
+                    opened_at + self.reminder_after,
                     now,
                 ),
             )
-            inserted = cursor.rowcount > 0
+            inserted = await cursor.fetchone() is not None
             if inserted:
-                self._insert_deliveries(connection, str(channel_id), now)
+                await self._insert_deliveries(connection, str(channel_id), now)
             return inserted
 
-    def cancel(self, channel_id: int) -> bool:
-        now = self._now().isoformat()
-        with sqlite3.connect(self.path) as connection:
-            cursor = connection.execute(
+    async def cancel(self, channel_id: int) -> bool:
+        now = self._now()
+        async with self.pool.connection() as connection:
+            cursor = await connection.execute(
                 """
                 UPDATE ticket_reminders
-                SET status = 'cancelled', updated_at = ?
-                WHERE channel_id = ? AND status = 'pending'
+                SET status = 'cancelled', updated_at = %s
+                WHERE channel_id = %s AND status = 'pending'
                 """,
                 (now, str(channel_id)),
             )
-            connection.execute(
+            await connection.execute(
                 """
                 UPDATE reminder_deliveries
-                SET status = 'cancelled', updated_at = ?
-                WHERE channel_id = ? AND status IN ('pending', 'sending')
+                SET status = 'cancelled', updated_at = %s
+                WHERE channel_id = %s AND status IN ('pending', 'sending')
                 """,
                 (now, str(channel_id)),
             )
             return cursor.rowcount > 0
 
-    def claim_due(self, now: datetime | None = None) -> list[dict[str, Any]]:
+    async def claim_due(self, now: datetime | None = None) -> list[dict[str, Any]]:
         now = (now or self._now()).astimezone(timezone.utc)
-        iso = now.isoformat()
-        with sqlite3.connect(self.path) as connection:
-            connection.row_factory = sqlite3.Row
-            connection.execute("BEGIN IMMEDIATE")
-            rows = connection.execute(
-                """
-                SELECT d.channel_id AS channel_id,
-                       d.target AS target,
-                       d.attempts AS attempts,
-                       r.guild_id AS guild_id,
-                       r.channel_name AS channel_name,
-                       r.opened_at AS opened_at,
-                       r.due_at AS due_at
-                FROM reminder_deliveries d
-                JOIN ticket_reminders r ON r.channel_id = d.channel_id
-                WHERE r.status = 'pending'
-                  AND d.status = 'pending'
-                  AND r.due_at <= ?
-                  AND (d.next_attempt_at IS NULL OR d.next_attempt_at <= ?)
-                ORDER BY r.due_at
-                """,
-                (iso, iso),
-            ).fetchall()
-            if rows:
-                connection.executemany(
+        async with self.pool.connection() as connection:
+            async with connection.transaction():
+                cursor = await connection.execute(
                     """
-                    UPDATE reminder_deliveries
-                    SET status = 'sending', updated_at = ?
-                    WHERE channel_id = ? AND target = ? AND status = 'pending'
+                    SELECT d.channel_id AS channel_id,
+                           d.target AS target,
+                           d.attempts AS attempts,
+                           r.guild_id AS guild_id,
+                           r.channel_name AS channel_name,
+                           r.opened_at AS opened_at,
+                           r.due_at AS due_at
+                    FROM reminder_deliveries d
+                    JOIN ticket_reminders r USING (channel_id)
+                    WHERE r.status = 'pending'
+                      AND d.status = 'pending'
+                      AND r.due_at <= %s
+                      AND (d.next_attempt_at IS NULL OR d.next_attempt_at <= %s)
+                    ORDER BY r.due_at
+                    FOR UPDATE OF d SKIP LOCKED
                     """,
-                    [(iso, row["channel_id"], row["target"]) for row in rows],
+                    (now, now),
                 )
-            return [dict(row) for row in rows]
+                rows = await cursor.fetchall()
+                if rows:
+                    await cursor.executemany(
+                        """
+                        UPDATE reminder_deliveries
+                        SET status = 'sending', updated_at = %s
+                        WHERE channel_id = %s AND target = %s
+                          AND status = 'pending'
+                        """,
+                        [(now, row["channel_id"], row["target"]) for row in rows],
+                    )
+                return rows
 
-    def is_sending(self, channel_id: str, target: str) -> bool:
-        with sqlite3.connect(self.path) as connection:
-            row = connection.execute(
+    async def is_sending(self, channel_id: str, target: str) -> bool:
+        async with self.pool.connection() as connection:
+            cursor = await connection.execute(
                 """
                 SELECT 1 FROM reminder_deliveries
-                WHERE channel_id = ? AND target = ? AND status = 'sending'
+                WHERE channel_id = %s AND target = %s AND status = 'sending'
                 """,
                 (str(channel_id), target),
-            ).fetchone()
-            return row is not None
+            )
+            return await cursor.fetchone() is not None
 
-    def mark_delivery_sent(self, channel_id: str, target: str) -> None:
-        now = self._now().isoformat()
-        with sqlite3.connect(self.path) as connection:
-            connection.execute(
+    async def mark_delivery_sent(self, channel_id: str, target: str) -> None:
+        now = self._now()
+        async with self.pool.connection() as connection:
+            await connection.execute(
                 """
                 UPDATE reminder_deliveries
-                SET status = 'sent', sent_at = ?, updated_at = ?
-                WHERE channel_id = ? AND target = ? AND status = 'sending'
+                SET status = 'sent', sent_at = %s, updated_at = %s
+                WHERE channel_id = %s AND target = %s AND status = 'sending'
                 """,
                 (now, now, str(channel_id), target),
             )
-            connection.execute(
+            await connection.execute(
                 """
                 UPDATE ticket_reminders
-                SET status = 'sent', sent_at = ?, updated_at = ?
-                WHERE channel_id = ? AND status = 'pending'
+                SET status = 'sent', sent_at = %s, updated_at = %s
+                WHERE channel_id = %s AND status = 'pending'
                   AND EXISTS (
                       SELECT 1 FROM reminder_deliveries
-                      WHERE channel_id = ? AND status = 'sent'
+                      WHERE channel_id = %s AND status = 'sent'
                   )
                   AND NOT EXISTS (
                       SELECT 1 FROM reminder_deliveries
-                      WHERE channel_id = ?
+                      WHERE channel_id = %s
                         AND status IN ('pending', 'sending', 'error')
                   )
                 """,
                 (now, now, str(channel_id), str(channel_id), str(channel_id)),
             )
 
-    def fail_delivery(
+    async def fail_delivery(
         self,
         channel_id: str,
         target: str,
@@ -271,114 +308,117 @@ class ReminderDatabase:
     ) -> tuple[str, int]:
         now = (now or self._now()).astimezone(timezone.utc)
         message = (error or "")[:500]
-        with sqlite3.connect(self.path) as connection:
-            row = connection.execute(
-                """
-                SELECT attempts FROM reminder_deliveries
-                WHERE channel_id = ? AND target = ? AND status = 'sending'
-                """,
-                (str(channel_id), target),
-            ).fetchone()
-            if row is None:
-                return ("unknown", 0)
-            attempts = row[0] + 1
-            if permanent or attempts >= self.retry_max_attempts:
-                status = "error"
-                next_attempt_at = None
-            else:
-                status = "pending"
-                delay = min(
-                    self.retry_max_seconds,
-                    self.retry_base_seconds * (2 ** (attempts - 1)),
+        async with self.pool.connection() as connection:
+            async with connection.transaction():
+                cursor = await connection.execute(
+                    """
+                    SELECT attempts FROM reminder_deliveries
+                    WHERE channel_id = %s AND target = %s AND status = 'sending'
+                    FOR UPDATE
+                    """,
+                    (str(channel_id), target),
                 )
-                next_attempt_at = (now + timedelta(seconds=delay)).isoformat()
-            connection.execute(
-                """
-                UPDATE reminder_deliveries
-                SET status = ?, attempts = ?, next_attempt_at = ?,
-                    last_error = ?, updated_at = ?
-                WHERE channel_id = ? AND target = ?
-                """,
-                (
-                    status,
-                    attempts,
-                    next_attempt_at,
-                    message,
-                    now.isoformat(),
-                    str(channel_id),
-                    target,
-                ),
-            )
-            return (status, attempts)
-
-    def retry_errors(self, channel_id: int | None = None) -> int:
-        now = self._now().isoformat()
-        with sqlite3.connect(self.path) as connection:
-            if channel_id is None:
-                cursor = connection.execute(
+                row = await cursor.fetchone()
+                if row is None:
+                    return ("unknown", 0)
+                attempts = row["attempts"] + 1
+                if permanent or attempts >= self.retry_max_attempts:
+                    status = "error"
+                    next_attempt_at = None
+                else:
+                    status = "pending"
+                    delay = min(
+                        self.retry_max_seconds,
+                        self.retry_base_seconds * (2 ** (attempts - 1)),
+                    )
+                    next_attempt_at = now + timedelta(seconds=delay)
+                await connection.execute(
                     """
                     UPDATE reminder_deliveries
-                    SET status = 'pending', next_attempt_at = NULL, updated_at = ?
+                    SET status = %s, attempts = %s, next_attempt_at = %s,
+                        last_error = %s, updated_at = %s
+                    WHERE channel_id = %s AND target = %s
+                    """,
+                    (
+                        status,
+                        attempts,
+                        next_attempt_at,
+                        message,
+                        now,
+                        str(channel_id),
+                        target,
+                    ),
+                )
+                return (status, attempts)
+
+    async def retry_errors(self, channel_id: int | None = None) -> int:
+        now = self._now()
+        async with self.pool.connection() as connection:
+            if channel_id is None:
+                cursor = await connection.execute(
+                    """
+                    UPDATE reminder_deliveries
+                    SET status = 'pending', next_attempt_at = NULL, updated_at = %s
                     WHERE status = 'error'
                     """,
                     (now,),
                 )
             else:
-                cursor = connection.execute(
+                cursor = await connection.execute(
                     """
                     UPDATE reminder_deliveries
-                    SET status = 'pending', next_attempt_at = NULL, updated_at = ?
-                    WHERE status = 'error' AND channel_id = ?
+                    SET status = 'pending', next_attempt_at = NULL, updated_at = %s
+                    WHERE status = 'error' AND channel_id = %s
                     """,
                     (now, str(channel_id)),
                 )
             return cursor.rowcount
 
-    def list_errors(self) -> list[dict[str, Any]]:
-        with sqlite3.connect(self.path) as connection:
-            connection.row_factory = sqlite3.Row
-            rows = connection.execute(
+    async def list_errors(self) -> list[dict[str, Any]]:
+        async with self.pool.connection() as connection:
+            cursor = await connection.execute(
                 """
                 SELECT channel_id, target, attempts, last_error, updated_at
                 FROM reminder_deliveries
                 WHERE status = 'error'
                 ORDER BY updated_at
                 """
-            ).fetchall()
-            return [dict(row) for row in rows]
+            )
+            return await cursor.fetchall()
 
-    def get_delivery(self, channel_id: str, target: str) -> dict[str, Any] | None:
-        with sqlite3.connect(self.path) as connection:
-            connection.row_factory = sqlite3.Row
-            row = connection.execute(
+    async def get_delivery(self, channel_id: str, target: str) -> dict[str, Any] | None:
+        async with self.pool.connection() as connection:
+            cursor = await connection.execute(
                 """
                 SELECT * FROM reminder_deliveries
-                WHERE channel_id = ? AND target = ?
+                WHERE channel_id = %s AND target = %s
                 """,
                 (str(channel_id), target),
-            ).fetchone()
-            return dict(row) if row is not None else None
+            )
+            return await cursor.fetchone()
 
-    def get_reminder(self, channel_id: str) -> dict[str, Any] | None:
-        with sqlite3.connect(self.path) as connection:
-            connection.row_factory = sqlite3.Row
-            row = connection.execute(
-                "SELECT * FROM ticket_reminders WHERE channel_id = ?",
+    async def get_reminder(self, channel_id: str) -> dict[str, Any] | None:
+        async with self.pool.connection() as connection:
+            cursor = await connection.execute(
+                "SELECT * FROM ticket_reminders WHERE channel_id = %s",
                 (str(channel_id),),
-            ).fetchone()
-            return dict(row) if row is not None else None
+            )
+            return await cursor.fetchone()
 
-    def _insert_deliveries(
-        self, connection: sqlite3.Connection, channel_id: str, now: str
+    async def _insert_deliveries(
+        self, connection: Any, channel_id: str, now: datetime
     ) -> None:
-        connection.executemany(
-            """
-            INSERT OR IGNORE INTO reminder_deliveries
-                (channel_id, target, status, attempts, next_attempt_at, updated_at)
-            VALUES (?, ?, 'pending', 0, NULL, ?)
-            """,
-            [(channel_id, target, now) for target in self.targets],
-        )
+        for target in self.targets:
+            await connection.execute(
+                """
+                INSERT INTO reminder_deliveries
+                    (channel_id, target, status, attempts, next_attempt_at,
+                     updated_at)
+                VALUES (%s, %s, 'pending', 0, NULL, %s)
+                ON CONFLICT (channel_id, target) DO NOTHING
+                """,
+                (channel_id, target, now),
+            )
 
     @staticmethod
     def _now() -> datetime:
@@ -386,34 +426,29 @@ class ReminderDatabase:
 
 
 class LectureDatabase:
-    """SQLite access layer for the lecture schedule feature (Phase 3).
-
-    Shares the same database file as :class:`ReminderDatabase` but owns only the
-    ``lectures`` table so the ticket reminder logic stays independent.
-    """
+    """PostgreSQL access layer for the lecture schedule feature (Phase 3)."""
 
     ID_LENGTH = 10
     ID_ATTEMPTS = 5
 
-    def __init__(self, path: Path) -> None:
-        self.path = path
+    def __init__(self, pool: AsyncConnectionPool) -> None:
+        self.pool = pool
 
-    def initialize(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(self.path) as connection:
-            connection.execute(_CREATE_LECTURES)
+    async def initialize(self) -> None:
+        async with self.pool.connection() as connection:
+            await _create_schema(connection, self._now())
             # Stale in-flight reminders are returned to pending after a restart so
             # a reminder interrupted by a crash is not lost.
-            connection.execute(
+            await connection.execute(
                 """
                 UPDATE lectures
-                SET reminder_status = 'pending', updated_at = ?
+                SET reminder_status = 'pending', updated_at = %s
                 WHERE status = 'scheduled' AND reminder_status = 'sending'
                 """,
-                (self._now().isoformat(),),
+                (self._now(),),
             )
 
-    def create(
+    async def create(
         self,
         guild_id: int,
         title: str,
@@ -426,69 +461,64 @@ class LectureDatabase:
     ) -> dict[str, Any]:
         starts_at = starts_at.astimezone(timezone.utc)
         now = self._now()
-        with sqlite3.connect(self.path) as connection:
-            connection.row_factory = sqlite3.Row
+        async with self.pool.connection() as connection:
             for _ in range(self.ID_ATTEMPTS):
                 lecture_id = uuid.uuid4().hex[: self.ID_LENGTH]
-                try:
-                    connection.execute(
-                        """
-                        INSERT INTO lectures
-                            (lecture_id, guild_id, title, lecturer, description,
-                             starts_at, announce_channel_id, reminder_lead_minutes,
-                             reminder_due_at, status, reminder_status, created_by,
-                             created_at, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', 'pending',
-                                ?, ?, ?)
-                        """,
-                        (
-                            lecture_id,
-                            str(guild_id),
-                            title,
-                            lecturer,
-                            description,
-                            starts_at.isoformat(),
-                            str(announce_channel_id),
-                            reminder_lead_minutes,
-                            (starts_at - timedelta(minutes=reminder_lead_minutes)).isoformat(),
-                            None if created_by is None else str(created_by),
-                            now.isoformat(),
-                            now.isoformat(),
-                        ),
-                    )
-                except sqlite3.IntegrityError:
-                    continue
-                return dict(connection.execute(
-                    "SELECT * FROM lectures WHERE lecture_id = ?",
-                    (lecture_id,),
-                ).fetchone())
+                cursor = await connection.execute(
+                    """
+                    INSERT INTO lectures
+                        (lecture_id, guild_id, title, lecturer, description,
+                         starts_at, announce_channel_id, reminder_lead_minutes,
+                         reminder_due_at, status, reminder_status, created_by,
+                         created_at, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'scheduled',
+                            'pending', %s, %s, %s)
+                    ON CONFLICT (lecture_id) DO NOTHING
+                    RETURNING *
+                    """,
+                    (
+                        lecture_id,
+                        str(guild_id),
+                        title,
+                        lecturer,
+                        description,
+                        starts_at,
+                        str(announce_channel_id),
+                        reminder_lead_minutes,
+                        starts_at - timedelta(minutes=reminder_lead_minutes),
+                        None if created_by is None else str(created_by),
+                        now,
+                        now,
+                    ),
+                )
+                row = await cursor.fetchone()
+                if row is not None:
+                    return row
         raise RuntimeError("failed to allocate a unique lecture id")
 
-    def get(self, lecture_id: str) -> dict[str, Any] | None:
-        with sqlite3.connect(self.path) as connection:
-            connection.row_factory = sqlite3.Row
-            row = connection.execute(
-                "SELECT * FROM lectures WHERE lecture_id = ?",
+    async def get(self, lecture_id: str) -> dict[str, Any] | None:
+        async with self.pool.connection() as connection:
+            cursor = await connection.execute(
+                "SELECT * FROM lectures WHERE lecture_id = %s",
                 (lecture_id,),
-            ).fetchone()
-            return dict(row) if row is not None else None
+            )
+            return await cursor.fetchone()
 
-    def list_lectures(
+    async def list_lectures(
         self,
         guild_id: int,
         include_cancelled: bool = False,
     ) -> list[dict[str, Any]]:
-        query = "SELECT * FROM lectures WHERE guild_id = ?"
+        query = "SELECT * FROM lectures WHERE guild_id = %s"
         parameters: list[Any] = [str(guild_id)]
         if not include_cancelled:
             query += " AND status != 'cancelled'"
         query += " ORDER BY starts_at"
-        with sqlite3.connect(self.path) as connection:
-            connection.row_factory = sqlite3.Row
-            rows = connection.execute(query, parameters).fetchall()
-            return [dict(row) for row in rows]
+        async with self.pool.connection() as connection:
+            cursor = await connection.execute(query, parameters)
+            return await cursor.fetchall()
 
-    def update(
+    async def update(
         self,
         lecture_id: str,
         title: str | None = None,
@@ -498,19 +528,25 @@ class LectureDatabase:
         announce_channel_id: int | None = None,
         reminder_lead_minutes: int | None = None,
     ) -> dict[str, Any] | None:
-        current = self.get(lecture_id)
+        current = await self.get(lecture_id)
         if current is None:
             return None
 
-        fields: dict[str, Any] = {}
+        assignments: list[str] = []
+        values: list[Any] = []
+
+        def set_field(column: str, value: Any) -> None:
+            assignments.append(f"{column} = %s")
+            values.append(value)
+
         if title is not None:
-            fields["title"] = title
+            set_field("title", title)
         if lecturer is not None:
-            fields["lecturer"] = lecturer
+            set_field("lecturer", lecturer)
         if description is not None:
-            fields["description"] = description
+            set_field("description", description)
         if announce_channel_id is not None:
-            fields["announce_channel_id"] = str(announce_channel_id)
+            set_field("announce_channel_id", str(announce_channel_id))
 
         lead = (
             reminder_lead_minutes
@@ -518,32 +554,32 @@ class LectureDatabase:
             else current["reminder_lead_minutes"]
         )
         if reminder_lead_minutes is not None:
-            fields["reminder_lead_minutes"] = reminder_lead_minutes
+            set_field("reminder_lead_minutes", reminder_lead_minutes)
         if starts_at is not None or reminder_lead_minutes is not None:
-            effective_start = starts_at or datetime.fromisoformat(current["starts_at"])
-            fields["reminder_due_at"] = (
-                effective_start.astimezone(timezone.utc)
-                - timedelta(minutes=lead)
-            ).isoformat()
+            effective_start = starts_at or current["starts_at"]
+            set_field(
+                "reminder_due_at",
+                effective_start.astimezone(timezone.utc) - timedelta(minutes=lead),
+            )
         if starts_at is not None:
-            fields["starts_at"] = starts_at.astimezone(timezone.utc).isoformat()
+            set_field("starts_at", starts_at.astimezone(timezone.utc))
 
-        if not fields:
+        if not assignments:
             return current
 
-        fields["updated_at"] = self._now().isoformat()
-        assignments = ", ".join(f"{name} = ?" for name in fields)
-        with sqlite3.connect(self.path) as connection:
-            connection.execute(
-                f"UPDATE lectures SET {assignments} WHERE lecture_id = ?",
-                (*fields.values(), lecture_id),
+        set_field("updated_at", self._now())
+        values.append(lecture_id)
+        async with self.pool.connection() as connection:
+            cursor = await connection.execute(
+                f"UPDATE lectures SET {', '.join(assignments)} "
+                "WHERE lecture_id = %s RETURNING *",
+                values,
             )
-        return self.get(lecture_id)
+            return await cursor.fetchone()
 
-    def cancel(self, lecture_id: str) -> dict[str, Any] | None:
-        now = self._now().isoformat()
-        with sqlite3.connect(self.path) as connection:
-            cursor = connection.execute(
+    async def cancel(self, lecture_id: str) -> dict[str, Any] | None:
+        async with self.pool.connection() as connection:
+            cursor = await connection.execute(
                 """
                 UPDATE lectures
                 SET status = 'cancelled',
@@ -551,89 +587,88 @@ class LectureDatabase:
                         WHEN reminder_status IN ('pending', 'sending') THEN 'cancelled'
                         ELSE reminder_status
                     END,
-                    updated_at = ?
-                WHERE lecture_id = ?
+                    updated_at = %s
+                WHERE lecture_id = %s
+                RETURNING *
                 """,
-                (now, lecture_id),
+                (self._now(), lecture_id),
             )
-            if cursor.rowcount == 0:
-                return None
-        return self.get(lecture_id)
+            return await cursor.fetchone()
 
-    def delete(self, lecture_id: str) -> bool:
-        with sqlite3.connect(self.path) as connection:
-            cursor = connection.execute(
-                "DELETE FROM lectures WHERE lecture_id = ?",
+    async def delete(self, lecture_id: str) -> bool:
+        async with self.pool.connection() as connection:
+            cursor = await connection.execute(
+                "DELETE FROM lectures WHERE lecture_id = %s",
                 (lecture_id,),
             )
             return cursor.rowcount > 0
 
-    def set_announcement_message(self, lecture_id: str, message_id: int) -> None:
-        with sqlite3.connect(self.path) as connection:
-            connection.execute(
+    async def set_announcement_message(self, lecture_id: str, message_id: int) -> None:
+        async with self.pool.connection() as connection:
+            await connection.execute(
                 """
                 UPDATE lectures
-                SET announcement_message_id = ?, updated_at = ?
-                WHERE lecture_id = ?
+                SET announcement_message_id = %s, updated_at = %s
+                WHERE lecture_id = %s
                 """,
-                (str(message_id), self._now().isoformat(), lecture_id),
+                (str(message_id), self._now(), lecture_id),
             )
 
-    def claim_due(self, now: datetime | None = None) -> list[dict[str, Any]]:
+    async def claim_due(self, now: datetime | None = None) -> list[dict[str, Any]]:
         """Claim lecture reminders that are due, expiring ones that already started."""
         now = (now or self._now()).astimezone(timezone.utc)
-        iso = now.isoformat()
-        with sqlite3.connect(self.path) as connection:
-            connection.row_factory = sqlite3.Row
-            connection.execute("BEGIN IMMEDIATE")
-            # A reminder only makes sense before the lecture starts; anything that
-            # already began (e.g. while the bot was restarting) is expired instead.
-            connection.execute(
-                """
-                UPDATE lectures
-                SET reminder_status = 'expired', updated_at = ?
-                WHERE status = 'scheduled'
-                  AND reminder_status IN ('pending', 'sending')
-                  AND starts_at <= ?
-                """,
-                (iso, iso),
-            )
-            rows = connection.execute(
-                """
-                SELECT * FROM lectures
-                WHERE status = 'scheduled'
-                  AND reminder_status = 'pending'
-                  AND reminder_due_at <= ?
-                  AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
-                ORDER BY reminder_due_at
-                """,
-                (iso, iso),
-            ).fetchall()
-            if rows:
-                connection.executemany(
+        async with self.pool.connection() as connection:
+            async with connection.transaction():
+                # A reminder only makes sense before the lecture starts; anything
+                # that already began (e.g. while restarting) is expired instead.
+                await connection.execute(
                     """
                     UPDATE lectures
-                    SET reminder_status = 'sending', updated_at = ?
-                    WHERE lecture_id = ? AND reminder_status = 'pending'
+                    SET reminder_status = 'expired', updated_at = %s
+                    WHERE status = 'scheduled'
+                      AND reminder_status IN ('pending', 'sending')
+                      AND starts_at <= %s
                     """,
-                    [(iso, row["lecture_id"]) for row in rows],
+                    (now, now),
                 )
-            return [dict(row) for row in rows]
+                cursor = await connection.execute(
+                    """
+                    SELECT * FROM lectures
+                    WHERE status = 'scheduled'
+                      AND reminder_status = 'pending'
+                      AND reminder_due_at <= %s
+                      AND (next_attempt_at IS NULL OR next_attempt_at <= %s)
+                    ORDER BY reminder_due_at
+                    FOR UPDATE SKIP LOCKED
+                    """,
+                    (now, now),
+                )
+                rows = await cursor.fetchall()
+                if rows:
+                    await cursor.executemany(
+                        """
+                        UPDATE lectures
+                        SET reminder_status = 'sending', updated_at = %s
+                        WHERE lecture_id = %s AND reminder_status = 'pending'
+                        """,
+                        [(now, row["lecture_id"]) for row in rows],
+                    )
+                return rows
 
-    def mark_reminder_sent(self, lecture_id: str, message_id: int) -> None:
-        now = self._now().isoformat()
-        with sqlite3.connect(self.path) as connection:
-            connection.execute(
+    async def mark_reminder_sent(self, lecture_id: str, message_id: int) -> None:
+        now = self._now()
+        async with self.pool.connection() as connection:
+            await connection.execute(
                 """
                 UPDATE lectures
-                SET reminder_status = 'sent', reminder_message_id = ?,
-                    reminder_sent_at = ?, last_error = NULL, updated_at = ?
-                WHERE lecture_id = ? AND reminder_status = 'sending'
+                SET reminder_status = 'sent', reminder_message_id = %s,
+                    reminder_sent_at = %s, last_error = NULL, updated_at = %s
+                WHERE lecture_id = %s AND reminder_status = 'sending'
                 """,
                 (str(message_id), now, now, lecture_id),
             )
 
-    def release_reminder(
+    async def release_reminder(
         self,
         lecture_id: str,
         error: str,
@@ -642,39 +677,39 @@ class LectureDatabase:
     ) -> None:
         """Return a failed reminder to pending so it is retried before the start."""
         now = (now or self._now()).astimezone(timezone.utc)
-        with sqlite3.connect(self.path) as connection:
-            connection.execute(
+        async with self.pool.connection() as connection:
+            await connection.execute(
                 """
                 UPDATE lectures
                 SET reminder_status = 'pending',
                     reminder_attempts = reminder_attempts + 1,
-                    next_attempt_at = ?,
-                    last_error = ?,
-                    updated_at = ?
-                WHERE lecture_id = ? AND reminder_status = 'sending'
+                    next_attempt_at = %s,
+                    last_error = %s,
+                    updated_at = %s
+                WHERE lecture_id = %s AND reminder_status = 'sending'
                 """,
                 (
-                    (now + timedelta(seconds=retry_seconds)).isoformat(),
+                    now + timedelta(seconds=retry_seconds),
                     (error or "")[:500],
-                    now.isoformat(),
+                    now,
                     lecture_id,
                 ),
             )
 
-    def expire_reminder(self, lecture_id: str, error: str) -> None:
+    async def expire_reminder(self, lecture_id: str, error: str) -> None:
         """Give up on a reminder that cannot be delivered (permanent failure)."""
-        with sqlite3.connect(self.path) as connection:
-            connection.execute(
+        async with self.pool.connection() as connection:
+            await connection.execute(
                 """
                 UPDATE lectures
                 SET reminder_status = 'expired',
                     reminder_attempts = reminder_attempts + 1,
                     next_attempt_at = NULL,
-                    last_error = ?,
-                    updated_at = ?
-                WHERE lecture_id = ? AND reminder_status = 'sending'
+                    last_error = %s,
+                    updated_at = %s
+                WHERE lecture_id = %s AND reminder_status = 'sending'
                 """,
-                ((error or "")[:500], self._now().isoformat(), lecture_id),
+                ((error or "")[:500], self._now(), lecture_id),
             )
 
     @staticmethod

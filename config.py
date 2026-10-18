@@ -1,7 +1,6 @@
 import os
 from dataclasses import dataclass
 from datetime import timedelta
-from pathlib import Path
 from typing import Tuple
 
 from dotenv import load_dotenv
@@ -120,7 +119,7 @@ class Config:
     retry_base_seconds: float
     retry_max_seconds: float
     retry_max_attempts: int
-    database_path: Path
+    database_url: str
     lecture_role_ids: Tuple[int, ...]
     lecture_reminder_minutes: int
     lecture_announce_channel_id: int | None
@@ -207,7 +206,12 @@ def load_config() -> Config:
         "RGA_RETRY_MAX_ATTEMPTS",
     )
 
-    database_path = Path(os.getenv("RGA_DATABASE_PATH", "data/rga_assistant.sqlite3"))
+    database_url = os.getenv("RGA_DATABASE_URL", "").strip()
+    if not database_url:
+        raise ValueError(
+            "RGA_DATABASE_URL is required "
+            "(例: postgresql://user:password@localhost:5432/rga)."
+        )
     lecture_role_ids = parse_discord_ids(
         os.getenv("RGA_LECTURE_ROLE_IDS", ""),
         "RGA_LECTURE_ROLE_IDS",
@@ -234,7 +238,7 @@ def load_config() -> Config:
         retry_base_seconds=retry_base_seconds,
         retry_max_seconds=retry_max_seconds,
         retry_max_attempts=retry_max_attempts,
-        database_path=database_path,
+        database_url=database_url,
         lecture_role_ids=lecture_role_ids,
         lecture_reminder_minutes=lecture_reminder_minutes,
         lecture_announce_channel_id=lecture_announce_channel_id,

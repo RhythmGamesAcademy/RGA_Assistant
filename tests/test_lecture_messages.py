@@ -118,7 +118,7 @@ class LectureListEmbedTests(unittest.TestCase):
             "lecture_id": "abc1234567",
             "title": "基礎リズム論",
             "lecturer": "講師A",
-            "starts_at": STARTS_AT.astimezone(timezone.utc).isoformat(),
+            "starts_at": STARTS_AT.astimezone(timezone.utc),
             "status": "scheduled",
         }
         lecture.update(overrides)
