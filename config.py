@@ -1,7 +1,6 @@
 import os
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Tuple
 
 from dotenv import load_dotenv
 
@@ -10,7 +9,7 @@ def parse_discord_ids(
     value: str,
     setting_name: str,
     allow_empty: bool = False,
-) -> Tuple[int, ...]:
+) -> tuple[int, ...]:
     if allow_empty and not value.strip():
         return ()
 
@@ -24,7 +23,7 @@ def parse_discord_ids(
     return ids
 
 
-def parse_category_ids(value: str) -> Tuple[int, ...]:
+def parse_category_ids(value: str) -> tuple[int, ...]:
     return parse_discord_ids(value, "Category IDs")
 
 
@@ -96,7 +95,7 @@ REMINDER_TARGETS = {
 }
 
 
-def parse_reminder_targets(value: str) -> Tuple[str, ...]:
+def parse_reminder_targets(value: str) -> tuple[str, ...]:
     normalized = value.strip().lower()
     targets = REMINDER_TARGETS.get(normalized)
     if targets is None:
@@ -105,7 +104,7 @@ def parse_reminder_targets(value: str) -> Tuple[str, ...]:
     return targets
 
 
-def parse_trigger_texts(value: str) -> Tuple[str, ...]:
+def parse_trigger_texts(value: str) -> tuple[str, ...]:
     """Parse the comma-separated cancel keywords, preserving order and deduping."""
     texts = tuple(
         dict.fromkeys(item.strip() for item in value.split(",") if item.strip())
@@ -118,11 +117,11 @@ def parse_trigger_texts(value: str) -> Tuple[str, ...]:
 @dataclass(frozen=True)
 class Config:
     discord_token: str
-    ticket_category_ids: Tuple[int, ...]
-    excluded_channel_ids: Tuple[int, ...]
-    reminder_trigger_texts: Tuple[str, ...]
+    ticket_category_ids: tuple[int, ...]
+    excluded_channel_ids: tuple[int, ...]
+    reminder_trigger_texts: tuple[str, ...]
     reminder_after: timedelta
-    reminder_targets: Tuple[str, ...]
+    reminder_targets: tuple[str, ...]
     retention_days: int
     operations_channel_id: int | None
     operations_mention_role_id: int | None
@@ -131,7 +130,7 @@ class Config:
     retry_max_seconds: float
     retry_max_attempts: int
     database_url: str
-    lecture_role_ids: Tuple[int, ...]
+    lecture_role_ids: tuple[int, ...]
     lecture_reminder_minutes: int
     lecture_announce_channel_id: int | None
 
@@ -161,7 +160,7 @@ def load_config() -> Config:
                 os.getenv("RGA_REMINDER_DAYS", "14"),
             )
         )
-    except (KeyError, ValueError) as exc:
+    except ValueError as exc:
         raise ValueError(
             "RGA_TICKET_CATEGORY_IDS (or legacy RGA_TICKET_CATEGORY_ID) and "
             "the reminder interval must contain valid values."
@@ -174,13 +173,10 @@ def load_config() -> Config:
     if reminder_value <= 0:
         raise ValueError("RGA_REMINDER_VALUE must be positive.")
 
-    try:
-        reminder_after = parse_reminder_after(
-            reminder_value,
-            os.getenv("RGA_REMINDER_UNIT", "days"),
-        )
-    except ValueError as exc:
-        raise ValueError(str(exc)) from exc
+    reminder_after = parse_reminder_after(
+        reminder_value,
+        os.getenv("RGA_REMINDER_UNIT", "days"),
+    )
 
     reminder_targets = parse_reminder_targets(
         os.getenv("RGA_REMINDER_TARGET", "ticket")
