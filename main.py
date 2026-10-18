@@ -36,10 +36,7 @@ def is_monitored_channel(
     category_ids: tuple[int, ...],
     excluded_channel_ids: tuple[int, ...],
 ) -> bool:
-    return (
-        category_id in category_ids
-        and channel_id not in excluded_channel_ids
-    )
+    return category_id in category_ids and channel_id not in excluded_channel_ids
 
 
 def is_reminder_cancel_message(
@@ -50,11 +47,12 @@ def is_reminder_cancel_message(
     excluded_channel_ids: tuple[int, ...],
     trigger_texts: tuple[str, ...],
 ) -> bool:
-    return (
-        channel_category_id in configured_category_ids
-        and channel_id not in excluded_channel_ids
-        and content in trigger_texts
-    )
+    return is_monitored_channel(
+        channel_category_id,
+        channel_id,
+        configured_category_ids,
+        excluded_channel_ids,
+    ) and content in trigger_texts
 
 
 def elapsed_days(opened_at: datetime, now: datetime | None = None) -> int:
@@ -127,6 +125,47 @@ def build_mention(role_id: int | None, user_id: int | None) -> str | None:
     if user_id is not None:
         return f"<@{user_id}>"
     return None
+
+
+def _mention_rules(role_id: int | None, user_id: int | None) -> discord.AllowedMentions:
+    if role_id is not None:
+        return discord.AllowedMentions(roles=[discord.Object(id=role_id)])
+    if user_id is not None:
+        return discord.AllowedMentions(users=[discord.Object(id=user_id)])
+    return discord.AllowedMentions.none()
+
+
+def build_delivery_message(
+    delivery: dict[str, Any], config: Config
+) -> tuple[str | None, discord.Embed, discord.AllowedMentions]:
+    """Build the content, embed, and mention rules for one reminder delivery."""
+    opened_at = delivery["opened_at"]
+    days = elapsed_days(opened_at)
+    if delivery["target"] == "operations":
+        role_id = config.operations_mention_role_id
+        user_id = config.operations_mention_user_id
+        return (
+            build_mention(role_id, user_id),
+            build_operations_reminder_embed(
+                delivery["channel_name"],
+                opened_at,
+                days,
+                delivery["guild_id"],
+                delivery["channel_id"],
+            ),
+            _mention_rules(role_id, user_id),
+        )
+    return (
+        None,
+        build_ticket_reminder_embed(
+            delivery["channel_name"],
+            opened_at,
+            days,
+            delivery["guild_id"],
+            delivery["channel_id"],
+        ),
+        discord.AllowedMentions.none(),
+    )
 
 
 def build_failure_notification_embed(
@@ -596,39 +635,7 @@ class RGAAssistant(discord.Client):
         if not await self.database.is_sending(delivery["channel_id"], target):
             return
 
-        opened_at = delivery["opened_at"]
-        days = elapsed_days(opened_at)
-        content: str | None = None
-        if target == "operations":
-            role_id = self.config.operations_mention_role_id
-            user_id = self.config.operations_mention_user_id
-            content = build_mention(role_id, user_id)
-            embed = build_operations_reminder_embed(
-                delivery["channel_name"],
-                opened_at,
-                days,
-                delivery["guild_id"],
-                delivery["channel_id"],
-            )
-            if role_id is not None:
-                allowed_mentions = discord.AllowedMentions(
-                    roles=[discord.Object(id=role_id)]
-                )
-            elif user_id is not None:
-                allowed_mentions = discord.AllowedMentions(
-                    users=[discord.Object(id=user_id)]
-                )
-            else:
-                allowed_mentions = discord.AllowedMentions.none()
-        else:
-            embed = build_ticket_reminder_embed(
-                delivery["channel_name"],
-                opened_at,
-                days,
-                delivery["guild_id"],
-                delivery["channel_id"],
-            )
-            allowed_mentions = discord.AllowedMentions.none()
+        content, embed, allowed_mentions = build_delivery_message(delivery, self.config)
 
         try:
             sent_message = await channel.send(
