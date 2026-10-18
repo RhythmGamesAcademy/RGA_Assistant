@@ -3,7 +3,9 @@ from datetime import datetime, timedelta, timezone
 
 import discord
 
+from config import Config
 from main import (
+    build_delivery_message,
     build_failure_list_embed,
     build_failure_notification_embed,
     build_mention,
@@ -13,6 +15,42 @@ from main import (
 )
 
 OPENED_AT = datetime(2026, 10, 1, 15, 0, tzinfo=timezone(timedelta(hours=9)))
+
+
+def make_config(**overrides) -> Config:
+    settings = dict(
+        discord_token="token",
+        ticket_category_ids=(10,),
+        excluded_channel_ids=(),
+        reminder_trigger_texts=("End",),
+        reminder_after=timedelta(days=14),
+        reminder_targets=("ticket",),
+        retention_days=90,
+        operations_channel_id=555,
+        operations_mention_role_id=None,
+        operations_mention_user_id=None,
+        retry_base_seconds=60.0,
+        retry_max_seconds=21600.0,
+        retry_max_attempts=6,
+        database_url="postgresql://localhost/rga",
+        lecture_role_ids=(),
+        lecture_reminder_minutes=15,
+        lecture_announce_channel_id=None,
+    )
+    settings.update(overrides)
+    return Config(**settings)
+
+
+def make_delivery(**overrides) -> dict:
+    delivery = {
+        "channel_id": "10",
+        "channel_name": "ticket-10",
+        "guild_id": "20",
+        "target": "ticket",
+        "opened_at": OPENED_AT.astimezone(timezone.utc),
+    }
+    delivery.update(overrides)
+    return delivery
 
 
 def embed_text(embed: discord.Embed) -> str:
@@ -92,6 +130,49 @@ class TicketEmbedTests(unittest.TestCase):
     def test_failure_list_embed_handles_empty_list(self) -> None:
         embed = build_failure_list_embed([])
         self.assertEqual(embed.description, "失敗状態の送信はありません。")
+
+
+class DeliveryMessageTests(unittest.TestCase):
+    def test_ticket_delivery_has_no_content_and_mentions_nobody(self) -> None:
+        content, embed, allowed = build_delivery_message(make_delivery(), make_config())
+        self.assertIsNone(content)
+        self.assertEqual(embed.title, "チケット確認リマインダー")
+        self.assertIn("https://discord.com/channels/20/10", embed_text(embed))
+        self.assertFalse(allowed.everyone)
+        self.assertFalse(allowed.roles)
+
+    def test_operations_delivery_mentions_the_configured_role(self) -> None:
+        config = make_config(
+            reminder_targets=("ticket", "operations"),
+            operations_mention_role_id=99,
+        )
+        content, embed, allowed = build_delivery_message(
+            make_delivery(target="operations"), config
+        )
+        self.assertEqual(content, "<@&99>")
+        self.assertIn("対応状況を確認してください。", embed_text(embed))
+        self.assertEqual(allowed.roles, [discord.Object(id=99)])
+
+    def test_operations_delivery_mentions_the_configured_user(self) -> None:
+        config = make_config(
+            reminder_targets=("ticket", "operations"),
+            operations_mention_user_id=42,
+        )
+        content, embed, allowed = build_delivery_message(
+            make_delivery(target="operations"), config
+        )
+        self.assertEqual(content, "<@42>")
+        self.assertEqual(allowed.users, [discord.Object(id=42)])
+
+    def test_operations_delivery_without_a_mention_target_is_silent(self) -> None:
+        config = make_config(reminder_targets=("ticket", "operations"))
+        content, embed, allowed = build_delivery_message(
+            make_delivery(target="operations"), config
+        )
+        self.assertIsNone(content)
+        self.assertFalse(allowed.everyone)
+        self.assertFalse(allowed.roles)
+        self.assertFalse(allowed.users)
 
 
 if __name__ == "__main__":
