@@ -580,7 +580,7 @@ class LectureCommands(app_commands.Group):
 
 
 class LectureScheduler:
-    """Sends lecture reminders that are due, persisting state in SQLite."""
+    """Sends lecture reminders that are due, persisting state in PostgreSQL."""
 
     def __init__(
         self,
