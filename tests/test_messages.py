@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 import discord
 
 from main import (
+    build_failure_list_embed,
     build_failure_notification_embed,
     build_mention,
     build_operations_reminder_embed,
@@ -70,6 +71,27 @@ class TicketEmbedTests(unittest.TestCase):
         self.assertIn("https://discord.com/channels/20/10", text)
         self.assertIn("python -m tools.retry", text)
         self.assertIn("boom", text)
+
+    def test_failure_list_embed_lists_errors(self) -> None:
+        rows = [
+            {
+                "channel_id": "10",
+                "target": "ticket",
+                "attempts": 6,
+                "last_error": "boom",
+                "updated_at": OPENED_AT,
+            }
+        ]
+        embed = build_failure_list_embed(rows)
+        text = embed_text(embed)
+        self.assertEqual(embed.title, "チケットリマインダー送信失敗一覧")
+        self.assertIn("`10`", text)
+        self.assertIn("boom", text)
+        self.assertIn("/rga retry", text)
+
+    def test_failure_list_embed_handles_empty_list(self) -> None:
+        embed = build_failure_list_embed([])
+        self.assertEqual(embed.description, "失敗状態の送信はありません。")
 
 
 if __name__ == "__main__":

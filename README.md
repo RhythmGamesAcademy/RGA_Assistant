@@ -36,7 +36,7 @@ Botを再起動してください。
 | `DISCORD_TOKEN` | ○ | — | Botのトークン。 |
 | `RGA_TICKET_CATEGORY_IDS` | ○ | — | 監視するDiscordカテゴリID（カンマ区切り）。 |
 | `RGA_EXCLUDED_CHANNEL_IDS` | | 空 | 監視対象から除外するチャンネルID（カンマ区切り）。 |
-| `RGA_REMINDER_TRIGGER_TEXT` | ○ | — | 未送信リマインダーをキャンセルする完全一致のメッセージ本文。 |
+| `RGA_REMINDER_TRIGGER_TEXT` | ○ | — | 未送信リマインダーをキャンセルするメッセージ本文。カンマ区切りで複数指定できます。 |
 | `RGA_REMINDER_VALUE` | | `14` | リマインダーまでの時間。 |
 | `RGA_REMINDER_UNIT` | | `days` | `seconds`/`minutes`/`hours`/`days`/`weeks`。 |
 | `RGA_REMINDER_TARGET` | | `ticket` | 送信先。`ticket`/`operations`/`both`。 |
@@ -46,6 +46,7 @@ Botを再起動してください。
 | `RGA_RETRY_BASE_SECONDS` | | `60` | 送信失敗時の再試行間隔の基準（秒）。 |
 | `RGA_RETRY_MAX_SECONDS` | | `21600` | 再試行間隔の上限（秒、既定6時間）。 |
 | `RGA_RETRY_MAX_ATTEMPTS` | | `6` | この回数失敗すると`error`状態になります。 |
+| `RGA_RETENTION_DAYS` | | `90` | 終了済みデータの保持日数。`python -m tools.purge` が使用します。 |
 | `RGA_DATABASE_URL` | ○ | — | PostgreSQLの接続文字列（例: `postgresql://rga:password@localhost:5432/rga_assistant`）。 |
 | `RGA_LECTURE_ROLE_IDS` | | 空 | 講義コマンドを実行できるロールID（カンマ区切り）。空の場合は管理者のみ。 |
 | `RGA_LECTURE_REMINDER_MINUTES` | | `15` | 講義開始の何分前にリマインダーを送るか。 |
@@ -86,9 +87,13 @@ Botを再起動してください。
 
 ### キャンセル
 
-`RGA_REMINDER_TRIGGER_TEXT` と完全に一致するメッセージが投稿されると、その
-チャンネルの未送信リマインダーをキャンセルします。大文字・小文字は区別し、
-部分一致ではキャンセルしません。
+`RGA_REMINDER_TRIGGER_TEXT` に列挙したキーワードのいずれかと完全に一致する
+メッセージが投稿されると、そのチャンネルの未送信リマインダーをキャンセルします。
+キーワードはカンマ区切りで複数指定でき、それぞれ**完全一致**で判定します。
+大文字・小文字は区別し、部分一致ではキャンセルしません（例: `終了, End`）。
+
+Ticket Toolのクローズ文面が複数ある場合は、それらをすべて列挙しておくと確実です。
+文面を変更するとキャンセルが効かなくなる点に注意してください。
 
 再オープンは扱いません。閉じたチケットで再度やり取りしたい場合は、新しい
 チケットを開いてもらう運用とします。
@@ -111,8 +116,14 @@ Botを再起動してください。
 
 ## 送信失敗からの復旧
 
-`error` 状態の送信は、次のコマンドで再試行対象に戻せます。リポジトリ直下で
-実行してください。
+`error` 状態の送信は、Discordから次のコマンドで確認・再試行できます
+（管理者または `RGA_LECTURE_ROLE_IDS` のロール保持者）。
+
+- `/rga failures`：失敗状態の送信を一覧表示します。
+- `/rga retry`：失敗状態の送信を再試行対象に戻します。`channel_id` を指定すると
+  そのチャンネルだけを対象にします。
+
+サーバー外（リポジトリ直下のCLI）から操作する場合は次のコマンドを使います。
 
 ```sh
 python -m tools.retry            # すべての失敗を再試行対象に戻す
@@ -137,6 +148,8 @@ python -m tools.retry --list     # 失敗状態を一覧表示
 | `/lecture cancel` | 講義予定を中止し、投稿済みメッセージを中止表示に更新して通知します。 | 同上 |
 | `/lecture list` | 講義予定の一覧を表示します。 | 全利用者 |
 | `/rga help` | Botの機能とコマンドの説明を表示します。 | 全利用者 |
+| `/rga failures` | 送信に失敗したチケットリマインダーを一覧表示します。 | `RGA_LECTURE_ROLE_IDS` のロール保持者または管理者 |
+| `/rga retry` | 失敗した送信を再試行対象に戻します。 | 同上 |
 
 `RGA_LECTURE_ROLE_IDS` が空の場合、`create` / `edit` / `cancel` は管理者のみ
 実行できます。
@@ -175,10 +188,11 @@ python -m tools.retry --list     # 失敗状態を一覧表示
 イベント**でチケット開設を検知する方式です（Ticket ToolのWebhook/APIはPro
 プラン以上の機能のため）。
 
-クローズ検知は `RGA_REMINDER_TRIGGER_TEXT` による完全一致に依存します。
-Ticket Toolのクローズ時メッセージ（カスタムメッセージ設定を含む）と本文が
-一致するように設定してください。文面を変更するとキャンセルが効かなくなる
-点に注意してください。
+クローズ検知は `RGA_REMINDER_TRIGGER_TEXT` に列挙したキーワードの完全一致に
+依存します。Ticket Toolのクローズ時メッセージ（カスタムメッセージ設定を含む）と
+本文が一致するように設定してください。文面が複数ある場合はカンマ区切りで
+すべて指定してください。文面を変更するとキャンセルが効かなくなる点に注意して
+ください。
 
 ## systemdによる運用
 
@@ -223,6 +237,56 @@ PostgreSQL（`RGA_DATABASE_URL`）にチケットの予定・送信状態と講�
 pg_dump --format=custom "$RGA_DATABASE_URL" > backup.dump
 ```
 
+### バックアップからの復旧
+
+障害や誤操作でデータを失った場合は、`pg_restore` で復旧します。**Botを停止してから**
+実行してください（起動中に書き込むと状態が競合します）。
+
+```sh
+sudo systemctl stop rga-assistant
+
+# 既存の中身を空にしてから復元する（別DBに復旧する場合は不要）
+psql "$RGA_DATABASE_URL" -c 'DROP SCHEMA public CASCADE; CREATE SCHEMA public;'
+
+# custom形式のダンプを復元する
+pg_restore --no-owner --no-privileges --dbname="$RGA_DATABASE_URL" backup.dump
+
+sudo systemctl start rga-assistant
+```
+
+復旧後の確認手順:
+
+1. `journalctl -u rga-assistant --since "5 min ago"` で起動ログにエラーがないか確認します。
+2. `psql "$RGA_DATABASE_URL" -c "SELECT version FROM schema_version"` でスキーマ
+   バージョンを確認します（起動時に自動で最新へ移行されます）。
+3. `psql "$RGA_DATABASE_URL" -c "SELECT status, count(*) FROM ticket_reminders GROUP BY status"`
+   で予定・送信済み・キャンセルの件数が想定どおりか確認します。
+4. `python -m tools.retry --list` で失敗状態が残っていないか確認します（残っていれば
+   `/rga retry` または `python -m tools.retry` で戻せます）。
+
+### 保存期間と削除
+
+終了したデータは自動では削除されないため、`python -m tools.purge` で定期的に
+削除します。保持期間は `RGA_RETENTION_DAYS`（既定90日）で、更新からその日数を
+過ぎた行が対象です。
+
+- `ticket_reminders` の `sent` / `cancelled`（関連する `reminder_deliveries` も連鎖削除）
+- 中止済み、またはリマインダーが `sent` / `expired` / `cancelled` の講義
+
+`pending` や `error` の行は削除しないため、未送信のリマインダーが失われることは
+ありません。cron等での定期実行を推奨します。
+
+```sh
+python -m tools.purge             # RGA_RETENTION_DAYS より古い終了分を削除
+python -m tools.purge --days 30   # 保持期間を上書き
+python -m tools.purge --dry-run   # 削除せず対象件数だけ表示
+```
+
+```sh
+# cron例（毎日 04:00）
+0 4 * * * cd /opt/rga-assistant && .venv/bin/python -m tools.purge
+```
+
 スキーマは `schema_version` テーブルで管理し、起動時にテーブル作成と必要な移行を
 自動適用します。`psycopg` の接続先は `postgresql://ユーザー:パスワード@ホスト:ポート/データベース`
 の形式で指定します。Windowsでは非同期接続のためにSelectorイベントループを使用します
@@ -251,7 +315,8 @@ python -m tools.migrate_sqlite path/to/legacy.sqlite3   # ファイルを指定�
 | `RGA_OPERATIONS_CHANNEL_ID is required ...` | `RGA_REMINDER_TARGET` が `operations`/`both` のときは運営チャンネルIDを設定します。 |
 | `Set either RGA_OPERATIONS_MENTION_ROLE_ID or ...` | メンションはロールかユーザーのどちらか一方だけを設定します。 |
 | リマインダーが送信されない | Botに「チャンネルを見る」「メッセージを送信」「リンクを埋め込む」権限があるか確認します。`error` 状態なら `python -m tools.retry` で復旧します。 |
-| クローズしたのに通知が来る | `RGA_REMINDER_TRIGGER_TEXT` がクローズ時メッセージと完全一致しているか確認します。 |
+| クローズしたのに通知が来る | `RGA_REMINDER_TRIGGER_TEXT` がクローズ時メッセージと完全一致しているか確認します（複数ある場合はカンマ区切り）。 |
+| データベースが大きくなってきた | `python -m tools.purge` で保存期間を過ぎた終了分を削除します（`RGA_RETENTION_DAYS`）。 |
 | スラッシュコマンドが表示されない | Bot招待時に `applications.commands` スコープを指定したか確認します。グローバル同期の反映には数分かかることがあります。 |
 | 講義コマンドで権限エラーになる | `RGA_LECTURE_ROLE_IDS` に対象ロールIDが設定されているか確認します。未設定の場合は管理者のみ実行できます。 |
 

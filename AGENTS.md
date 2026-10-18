@@ -21,6 +21,8 @@ cogs, or service layers.
   (`open_pool`).
 - `tools/retry.py` — async CLI (`asyncio.run`) to reset failed ticket deliveries
   (`error` → `pending`).
+- `tools/purge.py` — async CLI that deletes finished rows older than
+  `RGA_RETENTION_DAYS` (90 by default); `--days` / `--dry-run` override it.
 - `tools/migrate_sqlite.py` — idempotent async CLI that copies the legacy SQLite
   state into PostgreSQL (`ON CONFLICT DO NOTHING`).
 - `deploy/rga-assistant.service` — systemd unit template.
@@ -98,8 +100,9 @@ fail if run from another directory.
   load-bearing for the startup/rescan paths. There is **no reopen support**: a
   closed ticket is not reopened; a new ticket is expected instead.
 - `reminder_loop` ticks every 5s, so sends can be up to ~5s late.
-- An exact, case-sensitive match of `RGA_REMINDER_TRIGGER_TEXT` cancels the
-  pending reminder; bot messages and partial matches are ignored.
+- An exact, case-sensitive match of any keyword in `RGA_REMINDER_TRIGGER_TEXT`
+  (comma-separated, one or more) cancels the pending reminder; bot messages and
+  partial matches are ignored.
 - Lecture reminders are sent only **before** the start (`RGA_LECTURE_REMINDER_MINUTES`).
   `lectures.reminder_status` is `pending → sending → sent|expired|cancelled`;
   `status` is `scheduled|cancelled`. `claim_due` runs in a transaction and also

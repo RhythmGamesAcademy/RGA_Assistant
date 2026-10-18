@@ -105,14 +105,25 @@ def parse_reminder_targets(value: str) -> Tuple[str, ...]:
     return targets
 
 
+def parse_trigger_texts(value: str) -> Tuple[str, ...]:
+    """Parse the comma-separated cancel keywords, preserving order and deduping."""
+    texts = tuple(
+        dict.fromkeys(item.strip() for item in value.split(",") if item.strip())
+    )
+    if not texts:
+        raise ValueError("RGA_REMINDER_TRIGGER_TEXT is required.")
+    return texts
+
+
 @dataclass(frozen=True)
 class Config:
     discord_token: str
     ticket_category_ids: Tuple[int, ...]
     excluded_channel_ids: Tuple[int, ...]
-    reminder_trigger_text: str
+    reminder_trigger_texts: Tuple[str, ...]
     reminder_after: timedelta
     reminder_targets: Tuple[str, ...]
+    retention_days: int
     operations_channel_id: int | None
     operations_mention_role_id: int | None
     operations_mention_user_id: int | None
@@ -156,9 +167,9 @@ def load_config() -> Config:
             "the reminder interval must contain valid values."
         ) from exc
 
-    trigger_text = os.getenv("RGA_REMINDER_TRIGGER_TEXT", "").strip()
-    if not trigger_text:
-        raise ValueError("RGA_REMINDER_TRIGGER_TEXT is required.")
+    trigger_texts = parse_trigger_texts(
+        os.getenv("RGA_REMINDER_TRIGGER_TEXT", "")
+    )
 
     if reminder_value <= 0:
         raise ValueError("RGA_REMINDER_VALUE must be positive.")
@@ -205,6 +216,10 @@ def load_config() -> Config:
         os.getenv("RGA_RETRY_MAX_ATTEMPTS", "6"),
         "RGA_RETRY_MAX_ATTEMPTS",
     )
+    retention_days = parse_positive_int(
+        os.getenv("RGA_RETENTION_DAYS", "90"),
+        "RGA_RETENTION_DAYS",
+    )
 
     database_url = os.getenv("RGA_DATABASE_URL", "").strip()
     if not database_url:
@@ -229,9 +244,10 @@ def load_config() -> Config:
         discord_token=token,
         ticket_category_ids=category_ids,
         excluded_channel_ids=excluded_channel_ids,
-        reminder_trigger_text=trigger_text,
+        reminder_trigger_texts=trigger_texts,
         reminder_after=reminder_after,
         reminder_targets=reminder_targets,
+        retention_days=retention_days,
         operations_channel_id=operations_channel_id,
         operations_mention_role_id=operations_mention_role_id,
         operations_mention_user_id=operations_mention_user_id,

@@ -18,10 +18,13 @@ from embeds import (
     COLOR_ERROR,
     COLOR_INFO,
     COLOR_REMINDER,
+    MAX_DESCRIPTION,
     MAX_FIELD_VALUE,
+    error_embed,
+    success_embed,
     truncate,
 )
-from lecture import LectureCommands, LectureScheduler
+from lecture import LectureCommands, LectureScheduler, has_lecture_permission
 
 JST = timezone(timedelta(hours=9), name="JST")
 logger = logging.getLogger("rga_assistant")
@@ -45,12 +48,14 @@ def is_reminder_cancel_message(
     configured_category_ids: tuple[int, ...],
     channel_id: int,
     excluded_channel_ids: tuple[int, ...],
-    trigger_text: str,
+    trigger_texts: str | tuple[str, ...],
 ) -> bool:
+    if isinstance(trigger_texts, str):
+        trigger_texts = (trigger_texts,)
     return (
         channel_category_id in configured_category_ids
         and channel_id not in excluded_channel_ids
-        and content == trigger_text
+        and content in trigger_texts
     )
 
 
@@ -148,6 +153,29 @@ def build_failure_notification_embed(
     return embed
 
 
+def build_failure_list_embed(rows: list[dict[str, Any]]) -> discord.Embed:
+    if not rows:
+        return discord.Embed(
+            title="チケットリマインダー送信失敗一覧",
+            description="失敗状態の送信はありません。",
+            color=COLOR_INFO,
+        )
+    lines = []
+    for row in rows:
+        error = truncate(row["last_error"] or "-", 200)
+        lines.append(
+            f"- チャンネル `{row['channel_id']}`（{row['target']}）"
+            f" 試行{row['attempts']}回: {error}"
+        )
+    embed = discord.Embed(
+        title="チケットリマインダー送信失敗一覧",
+        description=truncate("\n".join(lines), MAX_DESCRIPTION),
+        color=COLOR_ERROR,
+    )
+    embed.set_footer(text="`/rga retry` で再試行対象に戻せます。")
+    return embed
+
+
 def build_help_embed() -> discord.Embed:
     embed = discord.Embed(
         title="RGA Assistant の機能",
@@ -178,6 +206,15 @@ def build_help_embed() -> discord.Embed:
         inline=False,
     )
     embed.add_field(
+        name="運営向けコマンド",
+        value=(
+            "`/rga failures` 送信に失敗したチケットリマインダーを一覧表示します"
+            "（管理者・運営）。\n"
+            "`/rga retry` 失敗した送信を再試行対象に戻します（管理者・運営）。"
+        ),
+        inline=False,
+    )
+    embed.add_field(
         name="その他",
         value="`/rga help` このヘルプを表示します。",
         inline=False,
@@ -187,13 +224,103 @@ def build_help_embed() -> discord.Embed:
 
 
 class RGACommands(app_commands.Group):
-    def __init__(self) -> None:
+    def __init__(self, config: Config, database: ReminderDatabase) -> None:
         super().__init__(name="rga", description="RGA Assistant の情報を表示します。")
+        self.config = config
+        self.database = database
+
+    async def _ensure_permission(self, interaction: discord.Interaction) -> bool:
+        member = interaction.user
+        if not isinstance(member, discord.Member):
+            await interaction.response.send_message(
+                embed=error_embed("このコマンドはサーバー内でのみ実行できます。"),
+                ephemeral=True,
+            )
+            return False
+        if has_lecture_permission(
+            member.guild_permissions.administrator,
+            {role.id for role in member.roles},
+            self.config.lecture_role_ids,
+        ):
+            return True
+        await interaction.response.send_message(
+            embed=error_embed(
+                "このコマンドを実行する権限がありません。運営に確認してください。"
+            ),
+            ephemeral=True,
+        )
+        return False
 
     @app_commands.command(name="help", description="RGA Assistant の機能とコマンドを表示します。")
     async def help(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_message(
             embed=build_help_embed(),
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @app_commands.command(
+        name="failures",
+        description="送信に失敗したチケットリマインダーを一覧表示します。",
+    )
+    async def failures(self, interaction: discord.Interaction) -> None:
+        if not await self._ensure_permission(interaction):
+            return
+        try:
+            rows = await self.database.list_errors()
+        except psycopg.Error:
+            logger.exception("Failed to list reminder errors")
+            await interaction.response.send_message(
+                embed=error_embed("失敗一覧の取得に失敗しました。ログを確認してください。"),
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_message(
+            embed=build_failure_list_embed(rows),
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @app_commands.command(
+        name="retry",
+        description="失敗したチケットリマインダーを再試行対象に戻します。",
+    )
+    @app_commands.describe(
+        channel_id="対象のチケットチャンネルID（省略すると全ての失敗）。"
+    )
+    async def retry(
+        self,
+        interaction: discord.Interaction,
+        channel_id: str | None = None,
+    ) -> None:
+        if not await self._ensure_permission(interaction):
+            return
+        target_id = None
+        if channel_id:
+            try:
+                target_id = int(channel_id.strip())
+            except ValueError:
+                await interaction.response.send_message(
+                    embed=error_embed("チャンネルIDは数字で指定してください。"),
+                    ephemeral=True,
+                )
+                return
+        try:
+            count = await self.database.retry_errors(target_id)
+        except psycopg.Error:
+            logger.exception("Failed to reset reminder errors")
+            await interaction.response.send_message(
+                embed=error_embed(
+                    "再試行対象への更新に失敗しました。ログを確認してください。"
+                ),
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_message(
+            embed=success_embed(
+                "再試行対象に戻しました",
+                f"{count}件の送信を再試行対象に戻しました。",
+            ),
             ephemeral=True,
             allowed_mentions=discord.AllowedMentions.none(),
         )
@@ -229,7 +356,7 @@ class RGAAssistant(discord.Client):
             self, self.config, self.lecture_database
         )
         self.tree.add_command(LectureCommands(self.config, self.lecture_database))
-        self.tree.add_command(RGACommands())
+        self.tree.add_command(RGACommands(self.config, self.database))
         self.reminder_loop.start()
         self.lecture_scheduler.start()
         try:
@@ -239,6 +366,7 @@ class RGAAssistant(discord.Client):
             logger.exception("Failed to sync application commands")
 
     async def close(self) -> None:
+        logger.info("Shutting down RGA Assistant")
         if self.pool is not None:
             await self.pool.close()
             self.pool = None
@@ -268,7 +396,7 @@ class RGAAssistant(discord.Client):
             for channel in guild.text_channels:
                 if self._is_monitored_ticket_channel(channel):
                     scanned += 1
-                    await self._register_ticket(channel)
+                    await self._safe_register_ticket(channel)
         logger.info(
             "Startup scan found %s text channels in monitored categories",
             scanned,
@@ -291,7 +419,7 @@ class RGAAssistant(discord.Client):
             channel.name,
         )
         if self._is_monitored_ticket_channel(channel):
-            await self._register_ticket(channel)
+            await self._safe_register_ticket(channel)
         else:
             self._log_ignored_channel(channel)
 
@@ -312,7 +440,7 @@ class RGAAssistant(discord.Client):
                 after.category_id,
                 after.name,
             )
-            await self._register_ticket(after)
+            await self._safe_register_ticket(after)
 
     async def on_message(self, message: discord.Message) -> None:
         if (
@@ -322,7 +450,7 @@ class RGAAssistant(discord.Client):
         ):
             return
 
-        if self._matches_trigger(message, self.config.reminder_trigger_text):
+        if self._matches_trigger(message, self.config.reminder_trigger_texts):
             if await self.database.cancel(message.channel.id):
                 logger.info(
                     "Cancelled ticket reminder after trigger text in channel %s",
@@ -330,14 +458,16 @@ class RGAAssistant(discord.Client):
                 )
             return
 
-    def _matches_trigger(self, message: discord.Message, trigger_text: str) -> bool:
+    def _matches_trigger(
+        self, message: discord.Message, trigger_texts: str | tuple[str, ...]
+    ) -> bool:
         return is_reminder_cancel_message(
             message.content,
             message.channel.category_id,
             self.config.ticket_category_ids,
             message.channel.id,
             self.config.excluded_channel_ids,
-            trigger_text,
+            trigger_texts,
         )
 
     def _is_monitored_ticket_channel(self, channel: discord.TextChannel) -> bool:
@@ -355,6 +485,15 @@ class RGAAssistant(discord.Client):
             channel.id,
             channel.category_id,
         )
+
+    async def _safe_register_ticket(self, channel: discord.TextChannel) -> None:
+        """Register one channel without letting a failure abort a batch scan."""
+        try:
+            await self._register_ticket(channel)
+        except Exception:
+            logger.exception(
+                "Failed to register reminder for channel %s", channel.id
+            )
 
     async def _register_ticket(self, channel: discord.TextChannel) -> None:
         inserted = await self.database.register(

@@ -9,6 +9,7 @@ from config import (
     parse_positive_int,
     parse_reminder_after,
     parse_reminder_targets,
+    parse_trigger_texts,
     validate_mention_targets,
 )
 
@@ -87,6 +88,25 @@ class RetryConfigTests(unittest.TestCase):
         for value in ("0", "-5", "abc"):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 parse_positive_int(value, "RGA_X")
+
+
+class ReminderTriggerConfigTests(unittest.TestCase):
+    def test_parses_comma_separated_keywords(self) -> None:
+        self.assertEqual(
+            parse_trigger_texts("終了, End"),
+            ("終了", "End"),
+        )
+
+    def test_single_keyword_stays_a_one_tuple(self) -> None:
+        self.assertEqual(parse_trigger_texts("End"), ("End",))
+
+    def test_removes_duplicates_and_blank_entries(self) -> None:
+        self.assertEqual(parse_trigger_texts("End, , End , 終了"), ("End", "終了"))
+
+    def test_rejects_empty_value(self) -> None:
+        for value in ("", "  ", ",", " , "):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                parse_trigger_texts(value)
 
 
 class ExcludedChannelConfigTests(unittest.TestCase):
