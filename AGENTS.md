@@ -2,7 +2,7 @@
 
 Discord bot (`discord.py`) that watches configured Discord categories for ticket
 channels (managed by Ticket Tool) and posts one reminder N time after a channel
-was created. Reminder state persists in SQLite. Also schedules lecture
+was created. Reminder state persists in PostgreSQL. Also schedules lecture
 announcements/reminders via slash commands. Flat module project — no packages,
 cogs, or service layers.
 
@@ -17,8 +17,12 @@ cogs, or service layers.
   mention is plain `content`.
 - `config.py` — env parsing into a frozen `Config`.
 - `database.py` — `ReminderDatabase` (tickets) and `LectureDatabase` (lectures),
-  the only SQLite access layer. Both share one DB file.
-- `tools/retry.py` — CLI to reset failed ticket deliveries (`error` → `pending`).
+  the only PostgreSQL access layer. Both share one async `AsyncConnectionPool`
+  (`open_pool`).
+- `tools/retry.py` — async CLI (`asyncio.run`) to reset failed ticket deliveries
+  (`error` → `pending`).
+- `tools/migrate_sqlite.py` — idempotent async CLI that copies the legacy SQLite
+  state into PostgreSQL (`ON CONFLICT DO NOTHING`).
 - `deploy/rga-assistant.service` — systemd unit template.
 - `specification.md` — aspirational multi-phase spec. **Phases 2 (ticket
   reminder) and 3 (lecture schedule) are implemented.** Inquiry classification
@@ -38,15 +42,18 @@ fail if run from another directory.
   - `.venv/Scripts/python.exe -m unittest discover -s tests`
 - Recreate elsewhere with `python -m venv .venv` + `pip install -r requirements.txt`.
 - Single test: `.venv/Scripts/python.exe -m unittest tests.test_database.ReminderDatabaseTests.test_registers_once_and_claims_when_due`
-- No linter, formatter, typecheck, or CI is configured; `discord.py` and
-  `python-dotenv` are the only deps. Requires Python 3.10+ (`int | None` syntax).
+- DB-backed tests connect to `RGA_TEST_DATABASE_URL` and are **skipped** when it is
+  unset. They truncate tables in each test, so point it at a disposable database.
+- No linter, formatter, typecheck, or CI is configured; `discord.py`,
+  `python-dotenv`, and `psycopg[binary,pool]` are the only deps. Requires Python
+  3.10+ (`int | None` syntax).
 
 ## Config (`.env`, loaded by python-dotenv in `load_config`)
 
 - Required: `DISCORD_TOKEN`, `RGA_TICKET_CATEGORY_IDS`, `RGA_REMINDER_TRIGGER_TEXT`.
 - Optional: `RGA_EXCLUDED_CHANNEL_IDS`; interval via `RGA_REMINDER_VALUE`
   (default `14`) + `RGA_REMINDER_UNIT` (`seconds|minutes|hours|days|weeks`,
-  default `days`); `RGA_DATABASE_PATH` (default `data/rga_assistant.sqlite3`).
+  default `days`); `RGA_DATABASE_URL` (**required**, PostgreSQL connection string).
 - Destination: `RGA_REMINDER_TARGET` (`ticket` default | `operations` | `both`),
   `RGA_OPERATIONS_CHANNEL_ID` (required for `operations`/`both`; also the failure
   notification target), `RGA_OPERATIONS_MENTION_ROLE_ID` or
@@ -67,13 +74,15 @@ fail if run from another directory.
 - Reminders are registered on bot startup (`on_ready` scan), channel create, and
   channel update that moves a channel into a monitored category. There is **no
   periodic re-scan**.
-- Due time = `channel.created_at` + interval. Stored in UTC in SQLite, computed
-  and displayed in JST (UTC+9 hardcoded as `JST` in `main.py`).
+- Due time = `channel.created_at` + interval. Stored as `TIMESTAMPTZ` (UTC),
+  computed and displayed in JST (UTC+9 hardcoded as `JST` in `main.py`). psycopg
+  returns aware `datetime` objects; don't call `datetime.fromisoformat` on them.
 - Two-level state. `ticket_reminders.status` is the overall lifecycle:
   `pending → sent|cancelled` (`sending` is legacy/unused). Per-destination state
   lives in `reminder_deliveries` (primary key `channel_id`+`target`):
   `pending → sending → sent|cancelled|error`.
-- `claim_due` uses `BEGIN IMMEDIATE` and flips delivery `pending→sending` to
+- `claim_due` runs in a transaction with `SELECT ... FOR UPDATE SKIP LOCKED` and
+  flips delivery `pending→sending` to
   prevent double sends; `initialize()` resets stuck `sending→pending` on startup.
   A reminder becomes `sent` only once every delivery is `sent` (an `error`
   delivery keeps the reminder `pending` so it can be retried).
@@ -83,7 +92,8 @@ fail if run from another directory.
   deliveries are reset by `python -m tools.retry`.
 - Deliveries are created per `target` at **registration time**, so changing
   `RGA_REMINDER_TARGET` only affects newly registered tickets.
-- `register` is `INSERT OR IGNORE`: re-registering an existing channel
+- `register` is `INSERT ... ON CONFLICT (channel_id) DO NOTHING`: re-registering an
+  existing channel
   (cancelled, sent, or pending) does NOT create or restore a reminder. This is
   load-bearing for the startup/rescan paths. There is **no reopen support**: a
   closed ticket is not reopened; a new ticket is expected instead.
@@ -92,7 +102,7 @@ fail if run from another directory.
   pending reminder; bot messages and partial matches are ignored.
 - Lecture reminders are sent only **before** the start (`RGA_LECTURE_REMINDER_MINUTES`).
   `lectures.reminder_status` is `pending → sending → sent|expired|cancelled`;
-  `status` is `scheduled|cancelled`. `claim_due` uses `BEGIN IMMEDIATE` and also
+  `status` is `scheduled|cancelled`. `claim_due` runs in a transaction and also
   expires `pending|sending` reminders whose `starts_at` has passed, so a restart
   past the start never sends a late reminder. Transient failures retry after 60s
   until the start; permanent ones expire. `initialize()` resets stuck
@@ -103,4 +113,10 @@ fail if run from another directory.
   Lecture messages use JST `YYYY/MM/DD HH:MM` input/output; timestamps stored UTC.
 - Commands are global-synced in `setup_hook`; invites need the
   `applications.commands` scope.
+- psycopg's async connections refuse Windows' default `ProactorEventLoop`. Call
+  `database.ensure_compatible_event_loop_policy()` **before** the loop starts
+  (`main()`, the `tools/` CLIs, and the DB test modules do). Without it the pool
+  times out at startup on Windows.
+- DB-backed tests need a real PostgreSQL; there is no SQLite fallback. Rows are
+  copied off the legacy SQLite file with `python -m tools.migrate_sqlite`.
 - User-facing strings, README, and spec are Japanese — keep them Japanese.

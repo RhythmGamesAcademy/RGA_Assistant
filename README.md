@@ -4,22 +4,26 @@ Ticket Tool連携のチケットリマインダーと講義スケジュール通
 設定したDiscordカテゴリ内のチャンネルが作成されると、その作成日時を起点に
 リマインダーを登録し、設定した時間が経過した後にチケットチャンネルや運営用
 チャンネルへ1回送信します。講義予定はスラッシュコマンドから登録でき、開始前に
-案内チャンネルへリマインダーを送信します。予定はSQLiteに保存され、Bot再起動後も
+案内チャンネルへリマインダーを送信します。予定はPostgreSQLに保存され、Bot再起動後も
 引き継がれます。
 
 ## セットアップ
 
 1. Python 3.10以降をインストールします。
-2. 仮想環境を作成・有効化し、`pip install -r requirements.txt` を実行します。
-3. `.env.example` を `.env` にコピーし、環境変数を設定します（次節参照）。
-4. 監視対象カテゴリでBotに**チャンネルを見る**・**メッセージを送信**・
+2. PostgreSQL 12以降を用意し、Bot用のデータベースとユーザーを作成します。
+3. 仮想環境を作成・有効化し、`pip install -r requirements.txt` を実行します。
+4. `.env.example` を `.env` にコピーし、環境変数を設定します（次節参照）。
+   `RGA_DATABASE_URL` にはPostgreSQLの接続文字列を指定します。
+5. 監視対象カテゴリでBotに**チャンネルを見る**・**メッセージを送信**・
    **リンクを埋め込む**権限を付与します。運営用チャンネルへ送信する場合も同様に
    権限を付与します。講義案内を投稿するチャンネルにも同じ権限が必要です。
-5. Botを招待する際は `bot` と `applications.commands` の両方のスコープを指定します
+6. Botを招待する際は `bot` と `applications.commands` の両方のスコープを指定します
    （スラッシュコマンドの登録に必要です）。
-6. [Discord Developer Portal](https://discord.com/developers/applications)で対象アプリを開き、
+7. [Discord Developer Portal](https://discord.com/developers/applications)で対象アプリを開き、
    **Bot** > **Privileged Gateway Intents** > **Message Content Intent**を有効にします。
-7. リポジトリ直下で `python main.py` を実行します。
+8. リポジトリ直下で `python main.py` を実行します。
+
+テーブルは起動時に自動作成されます。事前に手動でスキーマを流す必要はありません。
 
 Message Content Intentを有効にせずに起動すると、Discordが接続を拒否します。
 有効化後も同じエラーが出る場合は、Botトークンが対象アプリのものか確認してから
@@ -42,7 +46,7 @@ Botを再起動してください。
 | `RGA_RETRY_BASE_SECONDS` | | `60` | 送信失敗時の再試行間隔の基準（秒）。 |
 | `RGA_RETRY_MAX_SECONDS` | | `21600` | 再試行間隔の上限（秒、既定6時間）。 |
 | `RGA_RETRY_MAX_ATTEMPTS` | | `6` | この回数失敗すると`error`状態になります。 |
-| `RGA_DATABASE_PATH` | | `data/rga_assistant.sqlite3` | SQLiteデータベースのパス。 |
+| `RGA_DATABASE_URL` | ○ | — | PostgreSQLの接続文字列（例: `postgresql://rga:password@localhost:5432/rga_assistant`）。 |
 | `RGA_LECTURE_ROLE_IDS` | | 空 | 講義コマンドを実行できるロールID（カンマ区切り）。空の場合は管理者のみ。 |
 | `RGA_LECTURE_REMINDER_MINUTES` | | `15` | 講義開始の何分前にリマインダーを送るか。 |
 | `RGA_LECTURE_ANNOUNCE_CHANNEL_ID` | | 空 | 講義案内の既定投稿先チャンネル。`/lecture create` で個別指定も可能。 |
@@ -116,6 +120,9 @@ python -m tools.retry 1234567890 # 指定チャンネルのみ
 python -m tools.retry --list     # 失敗状態を一覧表示
 ```
 
+旧SQLiteデータの取り込みは `python -m tools.migrate_sqlite` で行います（「データベース」
+の節を参照）。
+
 ## 講義スケジュール
 
 `/lecture` コマンドで講義予定を登録し、開始前にリマインダーを送信します。
@@ -145,7 +152,7 @@ python -m tools.retry --list     # 失敗状態を一覧表示
 ### リマインダー
 
 開始の `RGA_LECTURE_REMINDER_MINUTES` 分前（既定15分前）に、登録した投稿先
-チャンネルへリマインダーを送信します。送信状態はSQLiteに保存され、Bot再起動後も
+チャンネルへリマインダーを送信します。送信状態はPostgreSQLに保存され、Bot再起動後も
 復元されます。予定の確認は30秒間隔で行うため、送信は最大約30秒遅れます。
 
 - 講義の開始時刻を過ぎた未送信リマインダーは送信せず、期限切れとして記録します。
@@ -207,15 +214,33 @@ journalctl -u rga-assistant --since today
 
 ## データベース
 
-SQLite（既定 `data/rga_assistant.sqlite3`）に予定と送信状態を保存します。
-バックアップはBotを停止した状態でファイルをコピーするか、`sqlite3` の
-`.backup` を利用してください。
+PostgreSQL（`RGA_DATABASE_URL`）にチケットの予定・送信状態と講義予定を保存します。
+接続にはpsycopg3の非同期接続プールを使用します。
+
+バックアップは `pg_dump` を利用してください。
 
 ```sh
-sqlite3 data/rga_assistant.sqlite3 ".backup 'backup.sqlite3'"
+pg_dump --format=custom "$RGA_DATABASE_URL" > backup.dump
 ```
 
-スキーマは `PRAGMA user_version` で管理し、起動時に必要な移行を自動適用します。
+スキーマは `schema_version` テーブルで管理し、起動時にテーブル作成と必要な移行を
+自動適用します。`psycopg` の接続先は `postgresql://ユーザー:パスワード@ホスト:ポート/データベース`
+の形式で指定します。Windowsでは非同期接続のためにSelectorイベントループを使用します
+（`main.py` が起動時に自動設定します）。
+
+### SQLiteからの移行
+
+旧バージョン（SQLite）の状態はPostgreSQLへ自動では引き継がれません。移行せずに起動
+すると、監視カテゴリ内のチケットが再登録され、送信済みのチケットへ再度リマインダーが
+送られることがあります。Botを停止した状態で、次のコマンドを一度実行してください。
+
+```sh
+python -m tools.migrate_sqlite                          # data/rga_assistant.sqlite3 から
+python -m tools.migrate_sqlite path/to/legacy.sqlite3   # ファイルを指定する場合
+```
+
+`ticket_reminders` / `reminder_deliveries` / `lectures` をコピーします。既存の行は変更
+しないため、再実行しても安全です。
 
 ## よくあるエラーと対処
 
@@ -232,6 +257,20 @@ sqlite3 data/rga_assistant.sqlite3 ".backup 'backup.sqlite3'"
 
 ## テスト
 
+テストはリポジトリ直下で実行します。データベースを使うテストは
+`RGA_TEST_DATABASE_URL` に接続先を設定した場合のみ実行され、未設定の場合はスキップ
+されます（テスト用データベースを指定してください。テーブルは各テストで初期化されます）。
+
 ```sh
+python -m unittest discover -s tests
+
+# PostgreSQLを使うテストも含めて実行する場合（Linux/macOS）
+RGA_TEST_DATABASE_URL=postgresql://rga:password@localhost:5432/rga_assistant_test \
+  python -m unittest discover -s tests
+```
+
+```powershell
+# PowerShellの場合
+$env:RGA_TEST_DATABASE_URL = "postgresql://rga:password@localhost:5432/rga_assistant_test"
 python -m unittest discover -s tests
 ```

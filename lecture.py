@@ -1,8 +1,8 @@
 import logging
-import sqlite3
 from datetime import datetime, timedelta, timezone
 
 import discord
+import psycopg
 from discord import app_commands
 from discord.ext import tasks
 
@@ -150,7 +150,7 @@ def build_lecture_list_embed(
     now = now or datetime.now(timezone.utc)
     lines = []
     for lecture in lectures:
-        starts_at = datetime.fromisoformat(lecture["starts_at"])
+        starts_at = lecture["starts_at"]
         if lecture["status"] == "cancelled":
             state = "中止"
         elif is_past(starts_at, now):
@@ -298,7 +298,7 @@ class LectureCommands(app_commands.Group):
             return
 
         await interaction.response.defer(thinking=True)
-        lecture = self.database.create(
+        lecture = await self.database.create(
             interaction.guild.id,
             title=title.strip(),
             lecturer=lecturer.strip(),
@@ -320,13 +320,13 @@ class LectureCommands(app_commands.Group):
                 allowed_mentions=discord.AllowedMentions.none(),
             )
         except discord.HTTPException as exc:
-            self.database.delete(lecture["lecture_id"])
+            await self.database.delete(lecture["lecture_id"])
             logger.exception("Failed to post lecture announcement")
             await interaction.followup.send(
                 embed=error_embed(f"講義案内の投稿に失敗しました: {exc}"), ephemeral=True
             )
             return
-        self.database.set_announcement_message(lecture["lecture_id"], message.id)
+        await self.database.set_announcement_message(lecture["lecture_id"], message.id)
         logger.info(
             "Registered lecture: lecture_id=%s starts_at=%s channel_id=%s",
             lecture["lecture_id"],
@@ -365,7 +365,7 @@ class LectureCommands(app_commands.Group):
         if not await self._ensure_permission(interaction):
             return
 
-        lecture = self.database.get(lecture_id.strip())
+        lecture = await self.database.get(lecture_id.strip())
         if lecture is None:
             await interaction.response.send_message(
                 embed=error_embed(
@@ -413,7 +413,7 @@ class LectureCommands(app_commands.Group):
                 return
 
         await interaction.response.defer(thinking=True)
-        updated = self.database.update(
+        updated = await self.database.update(
             lecture_id.strip(),
             title=None if title is None else title.strip(),
             lecturer=None if lecturer is None else lecturer.strip(),
@@ -431,7 +431,7 @@ class LectureCommands(app_commands.Group):
         # Edit the messages where they were originally posted, then post the change
         # notice to the (possibly new) announcement channel.
         original_channel_id = lecture["announce_channel_id"]
-        new_starts_at = datetime.fromisoformat(updated["starts_at"])
+        new_starts_at = updated["starts_at"]
         notice_channel_id = target.id if target is not None else int(original_channel_id)
 
         await self._edit_message(
@@ -492,7 +492,7 @@ class LectureCommands(app_commands.Group):
         if not await self._ensure_permission(interaction):
             return
 
-        lecture = self.database.get(lecture_id.strip())
+        lecture = await self.database.get(lecture_id.strip())
         if lecture is None:
             await interaction.response.send_message(
                 embed=error_embed(
@@ -508,14 +508,14 @@ class LectureCommands(app_commands.Group):
             return
 
         await interaction.response.defer(thinking=True)
-        cancelled = self.database.cancel(lecture_id.strip())
+        cancelled = await self.database.cancel(lecture_id.strip())
         if cancelled is None:
             await interaction.followup.send(
                 embed=error_embed("講義が見つからなかったため中止できませんでした。"),
                 ephemeral=True,
             )
             return
-        starts_at = datetime.fromisoformat(cancelled["starts_at"])
+        starts_at = cancelled["starts_at"]
         cancellation = build_cancellation_embed(cancelled["title"], starts_at)
 
         if cancelled["announcement_message_id"]:
@@ -569,7 +569,7 @@ class LectureCommands(app_commands.Group):
                 ephemeral=True,
             )
             return
-        lectures = self.database.list_lectures(
+        lectures = await self.database.list_lectures(
             interaction.guild.id, include_cancelled=include_cancelled
         )
         await interaction.response.send_message(
@@ -598,8 +598,8 @@ class LectureScheduler:
     @tasks.loop(seconds=LECTURE_TICK_SECONDS)
     async def reminder_loop(self) -> None:
         try:
-            due = self.database.claim_due()
-        except sqlite3.Error:
+            due = await self.database.claim_due()
+        except psycopg.Error:
             logger.exception("Failed to claim due lecture reminders")
             return
         for lecture in due:
@@ -621,23 +621,23 @@ class LectureScheduler:
         try:
             channel = await self.client.fetch_channel(channel_id)
         except discord.NotFound:
-            self._expire(lecture_id, "announce channel not found")
+            await self._expire(lecture_id, "announce channel not found")
             return
         except discord.Forbidden:
-            self._expire(lecture_id, "missing access to announce channel")
+            await self._expire(lecture_id, "missing access to announce channel")
             return
         except discord.HTTPException as exc:
-            self._release(lecture_id, f"HTTPException: {exc}")
+            await self._release(lecture_id, f"HTTPException: {exc}")
             return
-        except sqlite3.Error:
+        except psycopg.Error:
             logger.exception("Failed to check lecture channel %s", channel_id)
             return
 
         if not isinstance(channel, discord.TextChannel):
-            self._expire(lecture_id, "announce channel is not a text channel")
+            await self._expire(lecture_id, "announce channel is not a text channel")
             return
 
-        starts_at = datetime.fromisoformat(lecture["starts_at"])
+        starts_at = lecture["starts_at"]
         embed = build_reminder_embed(
             lecture["title"],
             lecture["lecturer"],
@@ -649,18 +649,18 @@ class LectureScheduler:
                 embed=embed, allowed_mentions=discord.AllowedMentions.none()
             )
         except discord.Forbidden:
-            self._expire(lecture_id, "missing permission to send message")
+            await self._expire(lecture_id, "missing permission to send message")
             return
         except discord.HTTPException as exc:
-            self._release(lecture_id, f"HTTPException: {exc}")
+            await self._release(lecture_id, f"HTTPException: {exc}")
             return
-        except sqlite3.Error:
+        except psycopg.Error:
             logger.exception("Failed to send lecture reminder %s", lecture_id)
             return
 
         try:
-            self.database.mark_reminder_sent(lecture_id, sent.id)
-        except sqlite3.Error:
+            await self.database.mark_reminder_sent(lecture_id, sent.id)
+        except psycopg.Error:
             logger.exception("Failed to finalize lecture reminder %s", lecture_id)
             return
         logger.info(
@@ -669,20 +669,20 @@ class LectureScheduler:
             sent.id,
         )
 
-    def _release(self, lecture_id: str, error: str) -> None:
+    async def _release(self, lecture_id: str, error: str) -> None:
         logger.error("Lecture reminder failed: lecture_id=%s error=%s", lecture_id, error)
         try:
-            self.database.release_reminder(
+            await self.database.release_reminder(
                 lecture_id, error, retry_seconds=LECTURE_RETRY_SECONDS
             )
-        except sqlite3.Error:
+        except psycopg.Error:
             logger.exception("Failed to record lecture reminder failure %s", lecture_id)
 
-    def _expire(self, lecture_id: str, error: str) -> None:
+    async def _expire(self, lecture_id: str, error: str) -> None:
         logger.error(
             "Lecture reminder gave up: lecture_id=%s error=%s", lecture_id, error
         )
         try:
-            self.database.expire_reminder(lecture_id, error)
-        except sqlite3.Error:
+            await self.database.expire_reminder(lecture_id, error)
+        except psycopg.Error:
             logger.exception("Failed to expire lecture reminder %s", lecture_id)

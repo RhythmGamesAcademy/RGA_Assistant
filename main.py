@@ -1,13 +1,19 @@
 import logging
-import sqlite3
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 import discord
+import psycopg
 from discord import app_commands
 from discord.ext import tasks
 
 from config import Config, load_config
-from database import LectureDatabase, ReminderDatabase
+from database import (
+    LectureDatabase,
+    ReminderDatabase,
+    ensure_compatible_event_loop_policy,
+    open_pool,
+)
 from embeds import (
     COLOR_ERROR,
     COLOR_INFO,
@@ -194,24 +200,34 @@ class RGACommands(app_commands.Group):
 
 
 class RGAAssistant(discord.Client):
-    def __init__(
-        self,
-        config: Config,
-        database: ReminderDatabase,
-        lecture_database: LectureDatabase,
-    ) -> None:
+    def __init__(self, config: Config) -> None:
         super().__init__(
             intents=discord.Intents(guilds=True, messages=True, message_content=True)
         )
         self.config = config
-        self.database = database
-        self.lecture_database = lecture_database
+        self.pool = None
+        self.database: ReminderDatabase | None = None
+        self.lecture_database: LectureDatabase | None = None
         self.tree = app_commands.CommandTree(self)
-        self.lecture_scheduler = LectureScheduler(self, config, lecture_database)
+        self.lecture_scheduler: LectureScheduler | None = None
 
     async def setup_hook(self) -> None:
-        self.database.initialize()
-        self.lecture_database.initialize()
+        assert self.pool is None
+        self.pool = await open_pool(self.config.database_url)
+        self.database = ReminderDatabase(
+            self.pool,
+            self.config.reminder_after,
+            self.config.reminder_targets,
+            retry_base_seconds=self.config.retry_base_seconds,
+            retry_max_seconds=self.config.retry_max_seconds,
+            retry_max_attempts=self.config.retry_max_attempts,
+        )
+        self.lecture_database = LectureDatabase(self.pool)
+        await self.database.initialize()
+        await self.lecture_database.initialize()
+        self.lecture_scheduler = LectureScheduler(
+            self, self.config, self.lecture_database
+        )
         self.tree.add_command(LectureCommands(self.config, self.lecture_database))
         self.tree.add_command(RGACommands())
         self.reminder_loop.start()
@@ -221,6 +237,12 @@ class RGAAssistant(discord.Client):
             logger.info("Synced %s application commands", len(synced))
         except discord.HTTPException:
             logger.exception("Failed to sync application commands")
+
+    async def close(self) -> None:
+        if self.pool is not None:
+            await self.pool.close()
+            self.pool = None
+        await super().close()
 
     async def on_ready(self) -> None:
         logger.info("Connected to Discord as %s", self.user)
@@ -246,7 +268,7 @@ class RGAAssistant(discord.Client):
             for channel in guild.text_channels:
                 if self._is_monitored_ticket_channel(channel):
                     scanned += 1
-                    self._register_ticket(channel)
+                    await self._register_ticket(channel)
         logger.info(
             "Startup scan found %s text channels in monitored categories",
             scanned,
@@ -269,7 +291,7 @@ class RGAAssistant(discord.Client):
             channel.name,
         )
         if self._is_monitored_ticket_channel(channel):
-            self._register_ticket(channel)
+            await self._register_ticket(channel)
         else:
             self._log_ignored_channel(channel)
 
@@ -290,7 +312,7 @@ class RGAAssistant(discord.Client):
                 after.category_id,
                 after.name,
             )
-            self._register_ticket(after)
+            await self._register_ticket(after)
 
     async def on_message(self, message: discord.Message) -> None:
         if (
@@ -301,7 +323,7 @@ class RGAAssistant(discord.Client):
             return
 
         if self._matches_trigger(message, self.config.reminder_trigger_text):
-            if self.database.cancel(message.channel.id):
+            if await self.database.cancel(message.channel.id):
                 logger.info(
                     "Cancelled ticket reminder after trigger text in channel %s",
                     message.channel.id,
@@ -334,8 +356,8 @@ class RGAAssistant(discord.Client):
             channel.category_id,
         )
 
-    def _register_ticket(self, channel: discord.TextChannel) -> None:
-        inserted = self.database.register(
+    async def _register_ticket(self, channel: discord.TextChannel) -> None:
+        inserted = await self.database.register(
             channel.id,
             channel.guild.id,
             channel.name,
@@ -356,14 +378,14 @@ class RGAAssistant(discord.Client):
             )
 
     async def on_guild_channel_delete(self, channel: discord.abc.GuildChannel) -> None:
-        if self.database.cancel(channel.id):
+        if await self.database.cancel(channel.id):
             logger.info("Cancelled pending reminder for deleted channel %s", channel.id)
 
     @tasks.loop(seconds=5)
     async def reminder_loop(self) -> None:
         try:
-            due = self.database.claim_due()
-        except sqlite3.Error:
+            due = await self.database.claim_due()
+        except psycopg.Error:
             logger.exception("Failed to claim due reminders")
             return
         for delivery in due:
@@ -379,7 +401,7 @@ class RGAAssistant(discord.Client):
     async def before_reminder_loop(self) -> None:
         await self.wait_until_ready()
 
-    async def _send_delivery(self, delivery: dict[str, str]) -> None:
+    async def _send_delivery(self, delivery: dict[str, Any]) -> None:
         target = delivery["target"]
         if target == "operations":
             destination_id = self.config.operations_channel_id
@@ -397,7 +419,7 @@ class RGAAssistant(discord.Client):
             channel = await self.fetch_channel(destination_id)
         except discord.NotFound:
             if target == "ticket":
-                self.database.cancel(int(delivery["channel_id"]))
+                await self.database.cancel(int(delivery["channel_id"]))
                 logger.info(
                     "Cancelled reminder for unavailable ticket %s",
                     delivery["channel_id"],
@@ -415,7 +437,7 @@ class RGAAssistant(discord.Client):
         except discord.HTTPException as exc:
             await self._record_failure(delivery, f"HTTPException: {exc}", permanent=False)
             return
-        except sqlite3.Error:
+        except psycopg.Error:
             logger.exception(
                 "Failed to check destination channel %s", delivery["channel_id"]
             )
@@ -423,7 +445,7 @@ class RGAAssistant(discord.Client):
 
         if not isinstance(channel, discord.TextChannel):
             if target == "ticket":
-                self.database.cancel(int(delivery["channel_id"]))
+                await self.database.cancel(int(delivery["channel_id"]))
                 logger.info(
                     "Ticket channel %s is no longer available",
                     delivery["channel_id"],
@@ -434,10 +456,10 @@ class RGAAssistant(discord.Client):
                 )
             return
 
-        if not self.database.is_sending(delivery["channel_id"], target):
+        if not await self.database.is_sending(delivery["channel_id"], target):
             return
 
-        opened_at = datetime.fromisoformat(delivery["opened_at"])
+        opened_at = delivery["opened_at"]
         days = elapsed_days(opened_at)
         content: str | None = None
         if target == "operations":
@@ -483,7 +505,7 @@ class RGAAssistant(discord.Client):
         except discord.HTTPException as exc:
             await self._record_failure(delivery, f"HTTPException: {exc}", permanent=False)
             return
-        except sqlite3.Error:
+        except psycopg.Error:
             logger.exception(
                 "Failed to send %s reminder for ticket %s",
                 target,
@@ -491,7 +513,7 @@ class RGAAssistant(discord.Client):
             )
             return
 
-        self.database.mark_delivery_sent(delivery["channel_id"], target)
+        await self.database.mark_delivery_sent(delivery["channel_id"], target)
         logger.info(
             "Sent %s reminder: channel_id=%s message_id=%s",
             target,
@@ -501,15 +523,15 @@ class RGAAssistant(discord.Client):
 
     async def _record_failure(
         self,
-        delivery: dict[str, str],
+        delivery: dict[str, Any],
         error: str,
         permanent: bool,
     ) -> None:
         try:
-            status, attempts = self.database.fail_delivery(
+            status, attempts = await self.database.fail_delivery(
                 delivery["channel_id"], delivery["target"], error, permanent
             )
-        except sqlite3.Error:
+        except psycopg.Error:
             logger.exception(
                 "Failed to record delivery failure for %s", delivery["channel_id"]
             )
@@ -528,7 +550,7 @@ class RGAAssistant(discord.Client):
 
     async def _notify_failure(
         self,
-        delivery: dict[str, str],
+        delivery: dict[str, Any],
         attempts: int,
         error: str,
     ) -> None:
@@ -549,7 +571,7 @@ class RGAAssistant(discord.Client):
                 ),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
-        except (discord.HTTPException, sqlite3.Error):
+        except (discord.HTTPException, psycopg.Error):
             logger.exception("Failed to notify operations about reminder failure")
 
 
@@ -558,21 +580,15 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    # psycopg's async connections need a selector loop on Windows; this must run
+    # before ``client.run`` creates the event loop.
+    ensure_compatible_event_loop_policy()
     try:
         config = load_config()
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
 
-    database = ReminderDatabase(
-        config.database_path,
-        config.reminder_after,
-        config.reminder_targets,
-        retry_base_seconds=config.retry_base_seconds,
-        retry_max_seconds=config.retry_max_seconds,
-        retry_max_attempts=config.retry_max_attempts,
-    )
-    lecture_database = LectureDatabase(config.database_path)
-    client = RGAAssistant(config, database, lecture_database)
+    client = RGAAssistant(config)
     try:
         client.run(config.discord_token, log_handler=None)
     except discord.PrivilegedIntentsRequired:

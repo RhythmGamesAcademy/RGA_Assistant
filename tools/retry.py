@@ -8,22 +8,49 @@ Usage (run from the repository root):
 """
 
 import argparse
+import asyncio
 import logging
 import sys
 
 from config import Config, load_config
-from database import ReminderDatabase
+from database import ReminderDatabase, ensure_compatible_event_loop_policy, open_pool
 
 
-def build_database(config: Config) -> ReminderDatabase:
+def build_database(config: Config, pool) -> ReminderDatabase:
     return ReminderDatabase(
-        config.database_path,
+        pool,
         config.reminder_after,
         config.reminder_targets,
         retry_base_seconds=config.retry_base_seconds,
         retry_max_seconds=config.retry_max_seconds,
         retry_max_attempts=config.retry_max_attempts,
     )
+
+
+async def run(args: argparse.Namespace, config: Config) -> int:
+    pool = await open_pool(config.database_url)
+    try:
+        database = build_database(config, pool)
+        await database.initialize()
+
+        if args.list:
+            errors = await database.list_errors()
+            if not errors:
+                print("エラー状態の送信はありません。")
+                return 0
+            for row in errors:
+                print(
+                    f"channel_id={row['channel_id']} target={row['target']} "
+                    f"attempts={row['attempts']} updated_at={row['updated_at']} "
+                    f"error={row['last_error']}"
+                )
+            return 0
+
+        count = await database.retry_errors(args.channel_id)
+        print(f"{count}件の送信を再試行対象に戻しました。")
+        return 0
+    finally:
+        await pool.close()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -48,30 +75,14 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
+    ensure_compatible_event_loop_policy()
+
     try:
         config = load_config()
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
 
-    database = build_database(config)
-    database.initialize()
-
-    if args.list:
-        errors = database.list_errors()
-        if not errors:
-            print("エラー状態の送信はありません。")
-            return 0
-        for row in errors:
-            print(
-                f"channel_id={row['channel_id']} target={row['target']} "
-                f"attempts={row['attempts']} updated_at={row['updated_at']} "
-                f"error={row['last_error']}"
-            )
-        return 0
-
-    count = database.retry_errors(args.channel_id)
-    print(f"{count}件の送信を再試行対象に戻しました。")
-    return 0
+    return asyncio.run(run(args, config))
 
 
 if __name__ == "__main__":
