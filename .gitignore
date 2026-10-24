@@ -1,4 +1,5 @@
 .env
+.setting
 __pycache__/
 *.py[cod]
 data/

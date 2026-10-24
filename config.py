@@ -5,6 +5,26 @@ from datetime import timedelta
 from dotenv import load_dotenv
 
 
+ENV_FILE = ".env"
+SETTING_FILE = ".setting"
+
+
+def load_env_files(
+    setting_file: str = SETTING_FILE,
+    env_file: str = ENV_FILE,
+) -> None:
+    """Load deployment settings and secrets from their two files.
+
+    Both files use the KEY=VALUE (dotenv) format: secrets such as the Discord
+    token and the database URL live in ``.env``, deployment-specific settings
+    live in ``.setting``. Values already present in the OS environment are
+    never overridden, so a later file never clobbers an earlier one; this
+    leaves systemd units or shells free to pass explicit variables.
+    """
+    load_dotenv(dotenv_path=setting_file)
+    load_dotenv(dotenv_path=env_file)
+
+
 def parse_discord_ids(
     value: str,
     setting_name: str,
@@ -152,7 +172,7 @@ class Config:
 
 
 def load_config() -> Config:
-    load_dotenv()
+    load_env_files()
 
     token = os.getenv("DISCORD_TOKEN")
     if not token:
