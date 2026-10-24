@@ -22,7 +22,8 @@ def make_config(**overrides) -> Config:
         discord_token="token",
         ticket_category_ids=(10,),
         excluded_channel_ids=(),
-        reminder_trigger_texts=("End",),
+        cancel_trigger="image",
+        reminder_trigger_texts=(),
         reminder_after=timedelta(days=14),
         reminder_targets=("ticket",),
         retention_days=90,
@@ -88,12 +89,28 @@ class MentionBuilderTests(unittest.TestCase):
 
 class TicketEmbedTests(unittest.TestCase):
     def test_ticket_embed_contains_link_and_jst_timestamp(self) -> None:
-        embed = build_ticket_reminder_embed("ticket-10", OPENED_AT, 14, "20", "10")
+        embed = build_ticket_reminder_embed(
+            "ticket-10", OPENED_AT, 14, "20", "10", cancel_trigger="image"
+        )
         text = embed_text(embed)
         self.assertEqual(embed.title, "チケット確認リマインダー")
         self.assertIn("https://discord.com/channels/20/10", text)
         self.assertIn("2026/10/01 15:00 JST", text)
         self.assertIn("14日", text)
+
+    def test_image_mode_embed_explains_the_unread_image(self) -> None:
+        embed = build_ticket_reminder_embed(
+            "ticket-10", OPENED_AT, 14, "20", "10", cancel_trigger="image"
+        )
+        text = embed_text(embed)
+        self.assertIn("申請画像が読み取れなかった", text)
+        self.assertNotIn("審査をお願いします。", text)
+
+    def test_keyword_mode_embed_keeps_the_review_request_wording(self) -> None:
+        embed = build_ticket_reminder_embed(
+            "ticket-10", OPENED_AT, 14, "20", "10", cancel_trigger="keyword"
+        )
+        self.assertIn("「審査をお願いします。」", embed_text(embed))
 
     def test_operations_embed_asks_to_review(self) -> None:
         embed = build_operations_reminder_embed("ticket-10", OPENED_AT, 14, "20", "10")

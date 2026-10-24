@@ -52,10 +52,15 @@ fail if run from another directory.
 
 ## Config (`.env`, loaded by python-dotenv in `load_config`)
 
-- Required: `DISCORD_TOKEN`, `RGA_TICKET_CATEGORY_IDS`, `RGA_REMINDER_TRIGGER_TEXT`.
+- Required: `DISCORD_TOKEN`, `RGA_TICKET_CATEGORY_IDS`. `RGA_REMINDER_TRIGGER_TEXT`
+  is required only when `RGA_REMINDER_CANCEL_TRIGGER` is `keyword`.
 - Optional: `RGA_EXCLUDED_CHANNEL_IDS`; interval via `RGA_REMINDER_VALUE`
   (default `14`) + `RGA_REMINDER_UNIT` (`seconds|minutes|hours|days|weeks`,
   default `days`); `RGA_DATABASE_URL` (**required**, PostgreSQL connection string).
+- Cancel condition: `RGA_REMINDER_CANCEL_TRIGGER` (`image` default | `keyword`,
+  mutually exclusive). `image` cancels on a user message with an image file
+  attachment; `keyword` cancels on an exact match of `RGA_REMINDER_TRIGGER_TEXT`
+  (comma-separated; required only in `keyword` mode, ignored otherwise).
 - Destination: `RGA_REMINDER_TARGET` (`ticket` default | `operations` | `both`),
   `RGA_OPERATIONS_CHANNEL_ID` (required for `operations`/`both`; also the failure
   notification target), `RGA_OPERATIONS_MENTION_ROLE_ID` or
@@ -67,7 +72,8 @@ fail if run from another directory.
   (default `/lecture create` post target; per-lecture override allowed).
 - Legacy vars still read: `RGA_TICKET_CATEGORY_ID`, `RGA_REMINDER_DAYS`.
 - Invalid config exits with a message. Discord **Message Content Intent** must be
-  enabled in the Developer Portal, otherwise `client.run` raises
+  enabled in the Developer Portal (the cancel trigger reads attachments, which
+  Discord strips without it), otherwise `client.run` raises
   `PrivilegedIntentsRequired` (caught and logged in Japanese).
 - Don't read .env, instead of using .env.example.
 
@@ -100,9 +106,16 @@ fail if run from another directory.
   load-bearing for the startup/rescan paths. There is **no reopen support**: a
   closed ticket is not reopened; a new ticket is expected instead.
 - `reminder_loop` ticks every 5s, so sends can be up to ~5s late.
-- An exact, case-sensitive match of any keyword in `RGA_REMINDER_TRIGGER_TEXT`
-  (comma-separated, one or more) cancels the pending reminder; bot messages and
-  partial matches are ignored.
+- Cancellation is selected by `RGA_REMINDER_CANCEL_TRIGGER` and applies at cancel
+  check time (mode changes affect already-registered tickets' future checks).
+  `image`: a user message with a file attachment whose `content_type` starts with
+  `image/` cancels the pending reminder; URL-embed images and stickers don't
+  count. `keyword`: an exact, case-sensitive match of any keyword in
+  `RGA_REMINDER_TRIGGER_TEXT` (comma-separated, one or more). In both modes bot
+  and webhook messages (Ticket Tool postings) are ignored, and the ticket embed
+  wording (`build_ticket_reminder_embed`) and `/rga help` text switch with the
+  mode. Message Content Intent must stay enabled — Discord strips attachments
+  from MESSAGE_CREATE without it.
 - Lecture reminders are sent only **before** the start (`RGA_LECTURE_REMINDER_MINUTES`).
   `lectures.reminder_status` is `pending → sending → sent|expired|cancelled`;
   `status` is `scheduled|cancelled`. `claim_due` runs in a transaction and also

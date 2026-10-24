@@ -52,13 +52,23 @@ class EmbedHelperTests(unittest.TestCase):
 
 class HelpEmbedTests(unittest.TestCase):
     def test_help_lists_ticket_and_lecture_features(self) -> None:
-        text = embed_text(build_help_embed())
+        text = embed_text(build_help_embed("image"))
         self.assertIn("チケットリマインダー", text)
         self.assertIn("/lecture create", text)
         self.assertIn("/lecture edit", text)
         self.assertIn("/lecture cancel", text)
         self.assertIn("/lecture list", text)
         self.assertIn("/rga help", text)
+
+    def test_image_mode_help_describes_image_cancellation(self) -> None:
+        text = embed_text(build_help_embed("image"))
+        self.assertIn("画像が添付された投稿があると", text)
+        self.assertNotIn("キーワード", text)
+
+    def test_keyword_mode_help_describes_keyword_cancellation(self) -> None:
+        text = embed_text(build_help_embed("keyword"))
+        self.assertIn("キャンセル用のキーワードに完全一致する投稿があると", text)
+        self.assertNotIn("画像", text)
 
 
 if __name__ == "__main__":

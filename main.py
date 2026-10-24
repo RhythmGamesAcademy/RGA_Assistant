@@ -39,20 +39,36 @@ def is_monitored_channel(
     return category_id in category_ids and channel_id not in excluded_channel_ids
 
 
+def message_has_image_attachment(
+    attachment_content_types: tuple[str | None, ...],
+) -> bool:
+    """Return True when any attachment is an image file (MIME type image/*)."""
+    return any(
+        content_type is not None and content_type.startswith("image/")
+        for content_type in attachment_content_types
+    )
+
+
 def is_reminder_cancel_message(
+    attachment_content_types: tuple[str | None, ...],
     content: str,
     channel_category_id: int | None,
     configured_category_ids: tuple[int, ...],
     channel_id: int,
     excluded_channel_ids: tuple[int, ...],
+    cancel_trigger: str,
     trigger_texts: tuple[str, ...],
 ) -> bool:
-    return is_monitored_channel(
+    if not is_monitored_channel(
         channel_category_id,
         channel_id,
         configured_category_ids,
         excluded_channel_ids,
-    ) and content in trigger_texts
+    ):
+        return False
+    if cancel_trigger == "image":
+        return message_has_image_attachment(attachment_content_types)
+    return content in trigger_texts
 
 
 def elapsed_days(opened_at: datetime, now: datetime | None = None) -> int:
@@ -66,15 +82,20 @@ def build_ticket_reminder_embed(
     days: int,
     guild_id: str,
     channel_id: str,
+    cancel_trigger: str,
 ) -> discord.Embed:
     opened_at_jst = opened_at.astimezone(JST)
+    if cancel_trigger == "image":
+        cancel_hint = "申請画像が読み取れなかった場合があります。"
+    else:
+        cancel_hint = "「審査をお願いします。」という文章が読み取れなかった場合があります。"
     embed = discord.Embed(
         title="チケット確認リマインダー",
         description=(
             f"チケット **{discord.utils.escape_markdown(channel_name)}** "
             f"の開設から{days}日が経過しました。\n"
             "もし申請をしているのにも関わらず、この文章が送られた場合は、"
-            "「審査をお願いします。」という文章が読み取れなかった場合があります。"
+            f"{cancel_hint}"
             "お問い合わせください。"
             "申請者は、もし申請を取り下げる場合、Endというボタンを押してください。"
         ),
@@ -163,6 +184,7 @@ def build_delivery_message(
             days,
             delivery["guild_id"],
             delivery["channel_id"],
+            config.cancel_trigger,
         ),
         discord.AllowedMentions.none(),
     )
@@ -213,11 +235,17 @@ def build_failure_list_embed(rows: list[dict[str, Any]]) -> discord.Embed:
     return embed
 
 
-def build_help_embed() -> discord.Embed:
+def build_help_embed(cancel_trigger: str) -> discord.Embed:
     embed = discord.Embed(
         title="RGA Assistant の機能",
         description="このBotで利用できる機能とコマンドの一覧です。",
         color=COLOR_INFO,
+    )
+    cancel_line = (
+        "画像が添付された投稿があると、未送信のリマインダーを取り消します。"
+        if cancel_trigger == "image"
+        else "キャンセル用のキーワードに完全一致する投稿があると、"
+        "未送信のリマインダーを取り消します。"
     )
     embed.add_field(
         name="チケットリマインダー",
@@ -225,9 +253,7 @@ def build_help_embed() -> discord.Embed:
             "監視対象カテゴリでチャンネルが作成されると、自動でリマインダーを"
             "登録します。\n"
             "設定した時間が経過すると、チケットチャンネルまたは運営用チャンネルへ"
-            "通知します。\n"
-            "キャンセル用のキーワードに完全一致する投稿があると、未送信の"
-            "リマインダーを取り消します。"
+            f"通知します。\n{cancel_line}"
         ),
         inline=False,
     )
@@ -291,7 +317,7 @@ class RGACommands(app_commands.Group):
     @app_commands.command(name="help", description="RGA Assistant の機能とコマンドを表示します。")
     async def help(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_message(
-            embed=build_help_embed(),
+            embed=build_help_embed(self.config.cancel_trigger),
             ephemeral=True,
             allowed_mentions=discord.AllowedMentions.none(),
         )
@@ -487,24 +513,24 @@ class RGAAssistant(discord.Client):
         ):
             return
 
-        if self._matches_trigger(message, self.config.reminder_trigger_texts):
+        if self._matches_trigger(message):
             if await self.database.cancel(message.channel.id):
                 logger.info(
-                    "Cancelled ticket reminder after trigger text in channel %s",
+                    "Cancelled ticket reminder after %s trigger in channel %s",
+                    self.config.cancel_trigger,
                     message.channel.id,
                 )
-            return
 
-    def _matches_trigger(
-        self, message: discord.Message, trigger_texts: tuple[str, ...]
-    ) -> bool:
+    def _matches_trigger(self, message: discord.Message) -> bool:
         return is_reminder_cancel_message(
+            tuple(attachment.content_type for attachment in message.attachments),
             message.content,
             message.channel.category_id,
             self.config.ticket_category_ids,
             message.channel.id,
             self.config.excluded_channel_ids,
-            trigger_texts,
+            self.config.cancel_trigger,
+            self.config.reminder_trigger_texts,
         )
 
     def _is_monitored_ticket_channel(self, channel: discord.TextChannel) -> bool:

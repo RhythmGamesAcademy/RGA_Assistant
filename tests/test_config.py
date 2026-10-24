@@ -2,6 +2,7 @@ import unittest
 from datetime import timedelta
 
 from config import (
+    parse_cancel_trigger,
     parse_category_ids,
     parse_discord_ids,
     parse_optional_id,
@@ -107,6 +108,21 @@ class ReminderTriggerConfigTests(unittest.TestCase):
         for value in ("", "  ", ",", " , "):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 parse_trigger_texts(value)
+
+
+class CancelTriggerConfigTests(unittest.TestCase):
+    def test_accepts_known_trigger_names(self) -> None:
+        self.assertEqual(parse_cancel_trigger("image"), "image")
+        self.assertEqual(parse_cancel_trigger("keyword"), "keyword")
+
+    def test_normalizes_case_and_whitespace(self) -> None:
+        self.assertEqual(parse_cancel_trigger(" Image "), "image")
+        self.assertEqual(parse_cancel_trigger("KEYWORD"), "keyword")
+
+    def test_rejects_unknown_trigger_names(self) -> None:
+        for value in ("", "text", "both", "image,keyword"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                parse_cancel_trigger(value)
 
 
 class ExcludedChannelConfigTests(unittest.TestCase):
