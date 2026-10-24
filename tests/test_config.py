@@ -5,12 +5,14 @@ from datetime import timedelta
 
 from config import (
     load_env_files,
+    parse_application_status_mode,
     parse_cancel_trigger,
     parse_category_ids,
     parse_discord_ids,
     parse_optional_id,
     parse_positive_float,
     parse_positive_int,
+    parse_probability,
     parse_reminder_after,
     parse_reminder_targets,
     parse_trigger_texts,
@@ -126,6 +128,33 @@ class CancelTriggerConfigTests(unittest.TestCase):
         for value in ("", "text", "both", "image,keyword"):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 parse_cancel_trigger(value)
+
+
+class ApplicationStatusModeConfigTests(unittest.TestCase):
+    def test_accepts_known_modes(self) -> None:
+        self.assertEqual(parse_application_status_mode("simple"), "simple")
+        self.assertEqual(parse_application_status_mode("jev"), "jev")
+
+    def test_normalizes_case_and_whitespace(self) -> None:
+        self.assertEqual(parse_application_status_mode(" JEV "), "jev")
+        self.assertEqual(parse_application_status_mode("Simple"), "simple")
+
+    def test_rejects_unknown_modes(self) -> None:
+        for value in ("", "both", "simple,jev", "ai"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                parse_application_status_mode(value)
+
+
+class ConfidenceThresholdConfigTests(unittest.TestCase):
+    def test_accepts_values_in_the_unit_range(self) -> None:
+        self.assertEqual(parse_probability("0", "RGA_X"), 0.0)
+        self.assertEqual(parse_probability("0.7", "RGA_X"), 0.7)
+        self.assertEqual(parse_probability("1", "RGA_X"), 1.0)
+
+    def test_rejects_out_of_range_and_invalid_values(self) -> None:
+        for value in ("-0.1", "1.5", "abc"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                parse_probability(value, "RGA_X")
 
 
 class ExcludedChannelConfigTests(unittest.TestCase):

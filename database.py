@@ -10,7 +10,8 @@ from psycopg_pool import AsyncConnectionPool
 
 logger = logging.getLogger("rga_assistant")
 
-SCHEMA_VERSION = 1
+# 2: `application_status` (ticket application evidence, Issue #5) — additive table.
+SCHEMA_VERSION = 2
 
 _CREATE_TICKET_REMINDERS = """
 CREATE TABLE IF NOT EXISTS ticket_reminders (
@@ -71,6 +72,19 @@ CREATE TABLE IF NOT EXISTS lectures (
 )
 """
 
+# Ticket application evidence. Independent of the reminder lifecycle on purpose:
+# rows are judged/overwritten continuously, also for tickets whose reminder is
+# already sent or cancelled, so there is no foreign key and no status machine.
+_CREATE_APPLICATION_STATUS = """
+CREATE TABLE IF NOT EXISTS application_status (
+    channel_id TEXT PRIMARY KEY,
+    has_application BOOLEAN,
+    mode TEXT NOT NULL CHECK (mode IN ('simple', 'jev')),
+    detail JSONB,
+    judged_at TIMESTAMPTZ NOT NULL
+)
+"""
+
 _CREATE_SCHEMA_VERSION = """
 CREATE TABLE IF NOT EXISTS schema_version (
     id BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id),
@@ -119,6 +133,7 @@ async def _create_schema(connection: Any, now: datetime) -> None:
     await connection.execute(_CREATE_TICKET_REMINDERS)
     await connection.execute(_CREATE_DELIVERIES)
     await connection.execute(_CREATE_LECTURES)
+    await connection.execute(_CREATE_APPLICATION_STATUS)
     await connection.execute(_CREATE_SCHEMA_VERSION)
     await connection.execute(_UPSERT_SCHEMA_VERSION, (SCHEMA_VERSION, now))
 
@@ -785,6 +800,114 @@ class LectureDatabase:
                 """,
                 ((error or "")[:500], self._now(), lecture_id),
             )
+
+    @staticmethod
+    def _now() -> datetime:
+        return datetime.now(timezone.utc)
+
+
+class ApplicationStatusDatabase:
+    """PostgreSQL access layer for ticket application evidence (Issue #5).
+
+    One row per monitored ticket channel, overwritten on every judgment. Rows
+    are independent from the reminder lifecycle: no foreign key, no state
+    machine, and they survive restarts. ``has_application`` meaning:
+
+    - ``TRUE``: an application was found (simple: an image attachment posted by
+      a user; jev: the judgment says 申請中/審査中).
+    - ``FALSE``: jev confidently judged 未申請 (below the confidence threshold
+      stays ``NULL`` as reference-only; simple mode never writes FALSE rows).
+    - ``NULL``: no decision yet / 判断不能 / low-confidence judgment.
+    """
+
+    def __init__(self, pool: AsyncConnectionPool) -> None:
+        self.pool = pool
+
+    async def ensure_schema(self) -> None:
+        """Create the schema without touching any stored state."""
+        async with self.pool.connection() as connection:
+            await _create_schema(connection, self._now())
+
+    async def save(
+        self,
+        channel_id: int | str,
+        *,
+        has_application: bool | None,
+        mode: str,
+        detail: dict[str, Any] | None = None,
+        judged_at: datetime | None = None,
+    ) -> None:
+        """Upsert the latest judgment for one channel.
+
+        The ``judged_at`` guard keeps an older judgment from overwriting a
+        newer one (e.g. an inline image event racing a slower Jev judgment).
+        """
+        moment = (judged_at or self._now()).astimezone(timezone.utc)
+        async with self.pool.connection() as connection:
+            await connection.execute(
+                """
+                INSERT INTO application_status
+                    (channel_id, has_application, mode, detail, judged_at)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (channel_id) DO UPDATE
+                SET has_application = EXCLUDED.has_application,
+                    mode = EXCLUDED.mode,
+                    detail = EXCLUDED.detail,
+                    judged_at = EXCLUDED.judged_at
+                WHERE application_status.judged_at <= EXCLUDED.judged_at
+                """,
+                (str(channel_id), has_application, mode, detail, moment),
+            )
+
+    async def get(self, channel_id: int | str) -> dict[str, Any] | None:
+        async with self.pool.connection() as connection:
+            cursor = await connection.execute(
+                "SELECT * FROM application_status WHERE channel_id = %s",
+                (str(channel_id),),
+            )
+            return await cursor.fetchone()
+
+    async def count_purgeable(self, before: datetime) -> int:
+        """Count stale rows that are no longer referenced by an open reminder."""
+        async with self.pool.connection() as connection:
+            cursor = await connection.execute(
+                """
+                SELECT count(*) AS count FROM application_status s
+                WHERE s.judged_at < %s
+                  AND NOT EXISTS (
+                      SELECT 1 FROM ticket_reminders r
+                      WHERE r.channel_id = s.channel_id
+                        AND r.status IN ('pending', 'sending', 'error')
+                  )
+                """,
+                (before.astimezone(timezone.utc),),
+            )
+            row = await cursor.fetchone()
+            return int(row["count"])
+
+    async def purge_old(self, before: datetime) -> int:
+        """Delete stale rows whose ticket is closed or no longer tracked.
+
+        Rows whose reminder still can be delivered (``pending``/``sending``/
+        ``error``) are kept even when old, so a still-open ticket keeps its
+        application evidence. Everything else (closed ticket, purged reminder,
+        or no reminder row at all) may be removed once ``judged_at`` passes the
+        retention cutoff.
+        """
+        async with self.pool.connection() as connection:
+            cursor = await connection.execute(
+                """
+                DELETE FROM application_status s
+                WHERE s.judged_at < %s
+                  AND NOT EXISTS (
+                      SELECT 1 FROM ticket_reminders r
+                      WHERE r.channel_id = s.channel_id
+                        AND r.status IN ('pending', 'sending', 'error')
+                  )
+                """,
+                (before.astimezone(timezone.utc),),
+            )
+            return cursor.rowcount
 
     @staticmethod
     def _now() -> datetime:

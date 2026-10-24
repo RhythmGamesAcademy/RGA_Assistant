@@ -149,6 +149,34 @@ def parse_cancel_trigger(value: str) -> str:
     return normalized
 
 
+APPLICATION_STATUS_MODES = {
+    "simple": "simple",
+    "jev": "jev",
+}
+
+
+def parse_application_status_mode(value: str) -> str:
+    """Parse the ticket application detection mode (simple or jev)."""
+    normalized = value.strip().lower()
+    if normalized not in APPLICATION_STATUS_MODES:
+        choices = ", ".join(APPLICATION_STATUS_MODES)
+        raise ValueError(
+            f"RGA_APPLICATION_STATUS_MODE must be one of: {choices}."
+        )
+    return normalized
+
+
+def parse_probability(value: str, setting_name: str) -> float:
+    """Parse a probability-like setting in the closed interval [0.0, 1.0]."""
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise ValueError(f"{setting_name} must be a number.") from exc
+    if parsed < 0.0 or parsed > 1.0:
+        raise ValueError(f"{setting_name} must be between 0.0 and 1.0.")
+    return parsed
+
+
 @dataclass(frozen=True)
 class Config:
     discord_token: str
@@ -169,6 +197,10 @@ class Config:
     lecture_role_ids: tuple[int, ...]
     lecture_reminder_minutes: int
     lecture_announce_channel_id: int | None
+    application_status_mode: str
+    jev_api_key: str
+    jev_model: str
+    application_status_confidence_threshold: float
 
 
 def load_config() -> Config:
@@ -277,6 +309,24 @@ def load_config() -> Config:
         os.getenv("RGA_LECTURE_ANNOUNCE_CHANNEL_ID", ""),
         "RGA_LECTURE_ANNOUNCE_CHANNEL_ID",
     )
+
+    # Application status detection (Issue #5). `simple` needs no external API;
+    # `jev` fails fast at startup when its API key is missing, so a mistaken
+    # configuration never silently degrades to an unconfigured service.
+    application_status_mode = parse_application_status_mode(
+        os.getenv("RGA_APPLICATION_STATUS_MODE", "simple")
+    )
+    jev_api_key = os.getenv("RGA_JEV_API_KEY", "").strip()
+    if application_status_mode == "jev" and not jev_api_key:
+        raise ValueError(
+            "RGA_JEV_API_KEY is required when RGA_APPLICATION_STATUS_MODE is jev."
+        )
+    jev_model = os.getenv("RGA_JEV_MODEL", "").strip() or "typesafe/jev-1.14"
+    application_status_confidence_threshold = parse_probability(
+        os.getenv("RGA_APPLICATION_STATUS_CONFIDENCE_THRESHOLD", "0.7"),
+        "RGA_APPLICATION_STATUS_CONFIDENCE_THRESHOLD",
+    )
+
     return Config(
         discord_token=token,
         ticket_category_ids=category_ids,
@@ -296,4 +346,8 @@ def load_config() -> Config:
         lecture_role_ids=lecture_role_ids,
         lecture_reminder_minutes=lecture_reminder_minutes,
         lecture_announce_channel_id=lecture_announce_channel_id,
+        application_status_mode=application_status_mode,
+        jev_api_key=jev_api_key,
+        jev_model=jev_model,
+        application_status_confidence_threshold=application_status_confidence_threshold,
     )
