@@ -114,11 +114,27 @@ def parse_trigger_texts(value: str) -> tuple[str, ...]:
     return texts
 
 
+CANCEL_TRIGGERS = {
+    "image": "image",
+    "keyword": "keyword",
+}
+
+
+def parse_cancel_trigger(value: str) -> str:
+    """Parse the ticket reminder cancellation condition (image or keyword)."""
+    normalized = value.strip().lower()
+    if normalized not in CANCEL_TRIGGERS:
+        choices = ", ".join(CANCEL_TRIGGERS)
+        raise ValueError(f"RGA_REMINDER_CANCEL_TRIGGER must be one of: {choices}.")
+    return normalized
+
+
 @dataclass(frozen=True)
 class Config:
     discord_token: str
     ticket_category_ids: tuple[int, ...]
     excluded_channel_ids: tuple[int, ...]
+    cancel_trigger: str
     reminder_trigger_texts: tuple[str, ...]
     reminder_after: timedelta
     reminder_targets: tuple[str, ...]
@@ -166,9 +182,14 @@ def load_config() -> Config:
             "the reminder interval must contain valid values."
         ) from exc
 
-    trigger_texts = parse_trigger_texts(
-        os.getenv("RGA_REMINDER_TRIGGER_TEXT", "")
+    cancel_trigger = parse_cancel_trigger(
+        os.getenv("RGA_REMINDER_CANCEL_TRIGGER", "image")
     )
+    trigger_texts: tuple[str, ...] = ()
+    if cancel_trigger == "keyword":
+        trigger_texts = parse_trigger_texts(
+            os.getenv("RGA_REMINDER_TRIGGER_TEXT", "")
+        )
 
     if reminder_value <= 0:
         raise ValueError("RGA_REMINDER_VALUE must be positive.")
@@ -240,6 +261,7 @@ def load_config() -> Config:
         discord_token=token,
         ticket_category_ids=category_ids,
         excluded_channel_ids=excluded_channel_ids,
+        cancel_trigger=cancel_trigger,
         reminder_trigger_texts=trigger_texts,
         reminder_after=reminder_after,
         reminder_targets=reminder_targets,

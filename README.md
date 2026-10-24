@@ -36,7 +36,8 @@ Botを再起動してください。
 | `DISCORD_TOKEN` | ○ | — | Botのトークン。 |
 | `RGA_TICKET_CATEGORY_IDS` | ○ | — | 監視するDiscordカテゴリID（カンマ区切り）。 |
 | `RGA_EXCLUDED_CHANNEL_IDS` | | 空 | 監視対象から除外するチャンネルID（カンマ区切り）。 |
-| `RGA_REMINDER_TRIGGER_TEXT` | ○ | — | 未送信リマインダーをキャンセルするメッセージ本文。カンマ区切りで複数指定できます。 |
+| `RGA_REMINDER_CANCEL_TRIGGER` | | `image` | 未送信リマインダーのキャンセル条件。`image` / `keyword` から選択します（「キャンセル」節参照）。 |
+| `RGA_REMINDER_TRIGGER_TEXT` | △ | — | `RGA_REMINDER_CANCEL_TRIGGER` が `keyword` のときのみ必須。未送信リマインダーをキャンセルするメッセージ本文。カンマ区切りで複数指定できます。 |
 | `RGA_REMINDER_VALUE` | | `14` | リマインダーまでの時間。 |
 | `RGA_REMINDER_UNIT` | | `days` | `seconds`/`minutes`/`hours`/`days`/`weeks`。 |
 | `RGA_REMINDER_TARGET` | | `ticket` | 送信先。`ticket`/`operations`/`both`。 |
@@ -87,13 +88,25 @@ Botを再起動してください。
 
 ### キャンセル
 
-`RGA_REMINDER_TRIGGER_TEXT` に列挙したキーワードのいずれかと完全に一致する
-メッセージが投稿されると、そのチャンネルの未送信リマインダーをキャンセルします。
-キーワードはカンマ区切りで複数指定でき、それぞれ**完全一致**で判定します。
-大文字・小文字は区別し、部分一致ではキャンセルしません（例: `終了, End`）。
+`RGA_REMINDER_CANCEL_TRIGGER` でキャンセル条件を選びます（併用はできません）。
 
-Ticket Toolのクローズ文面が複数ある場合は、それらをすべて列挙しておくと確実です。
-文面を変更するとキャンセルが効かなくなる点に注意してください。
+- `image`（既定）：監視カテゴリ内のチケットチャンネルに、**画像ファイルを添付した投稿**
+  があると、そのチャンネルの未送信リマインダーをキャンセルします。
+  （PNG/JPEG/GIF/WebPなど、添付ファイルのMIMEタイプが `image/*` のもの）
+- `keyword`：`RGA_REMINDER_TRIGGER_TEXT` に列挙したキーワードのいずれかと完全に一致する
+  メッセージが投稿されると、そのチャンネルの未送信リマインダーをキャンセルします
+  （従来の動作）。このとき `RGA_REMINDER_TRIGGER_TEXT` は必須です。キーワードは
+  カンマ区切りで複数指定でき、それぞれ**完全一致**で判定します。大文字・小文字は
+  区別し、部分一致ではキャンセルしません（例: `終了, End`）。
+
+共通の注意点:
+
+- BotやWebhookが投稿したメッセージはキャンセル判定の対象外です。申請者本人の
+  投稿のみが対象です。
+- 画像URLを貼り付けた際に生成される埋め込みプレビューは、添付ファイルではないため
+  対象外です。
+- 設定値はモード変更後の判定から適用されます。既に登録済みの予定も、以後の判定では
+  新しい設定が使われます。
 
 再オープンは扱いません。閉じたチケットで再度やり取りしたい場合は、新しい
 チケットを開いてもらう運用とします。
@@ -188,9 +201,11 @@ python -m tools.retry --list     # 失敗状態を一覧表示
 イベント**でチケット開設を検知する方式です（Ticket ToolのWebhook/APIはPro
 プラン以上の機能のため）。
 
-クローズ検知は `RGA_REMINDER_TRIGGER_TEXT` に列挙したキーワードの完全一致に
-依存します。Ticket Toolのクローズ時メッセージ（カスタムメッセージ設定を含む）と
-本文が一致するように設定してください。文面が複数ある場合はカンマ区切りで
+キャンセル条件は `RGA_REMINDER_CANCEL_TRIGGER` の設定に従います。`image`
+（既定）では、申請完了の合図として申請者がチケットチャンネルへ画像を**ファイル添付**
+してもらう運用になります（URLの貼り付けやBotの投稿は対象外です）。`keyword` では、
+申請完了時に申請者へ送ってもらうメッセージ本文と `RGA_REMINDER_TRIGGER_TEXT` の
+キーワードが**完全一致**するようにしてください。文面が複数ある場合はカンマ区切りで
 すべて指定してください。文面を変更するとキャンセルが効かなくなる点に注意して
 ください。
 
@@ -315,7 +330,7 @@ python -m tools.migrate_sqlite path/to/legacy.sqlite3   # ファイルを指定�
 | `RGA_OPERATIONS_CHANNEL_ID is required ...` | `RGA_REMINDER_TARGET` が `operations`/`both` のときは運営チャンネルIDを設定します。 |
 | `Set either RGA_OPERATIONS_MENTION_ROLE_ID or ...` | メンションはロールかユーザーのどちらか一方だけを設定します。 |
 | リマインダーが送信されない | Botに「チャンネルを見る」「メッセージを送信」「リンクを埋め込む」権限があるか確認します。`error` 状態なら `python -m tools.retry` で復旧します。 |
-| クローズしたのに通知が来る | `RGA_REMINDER_TRIGGER_TEXT` がクローズ時メッセージと完全一致しているか確認します（複数ある場合はカンマ区切り）。 |
+| 画像やキーワードを送ったのに通知が来る | `RGA_REMINDER_CANCEL_TRIGGER` の設定と運用の合致を確認します。`image` なら、申請者の画像がファイルとして添付されているか（Bot/Webhook投稿やURLの埋め込みは対象外）を確認します。`keyword` なら、`RGA_REMINDER_TRIGGER_TEXT` が投稿本文と完全一致しているか確認します（複数ある場合はカンマ区切り）。 |
 | データベースが大きくなってきた | `python -m tools.purge` で保存期間を過ぎた終了分を削除します（`RGA_RETENTION_DAYS`）。 |
 | スラッシュコマンドが表示されない | Bot招待時に `applications.commands` スコープを指定したか確認します。グローバル同期の反映には数分かかることがあります。 |
 | 講義コマンドで権限エラーになる | `RGA_LECTURE_ROLE_IDS` に対象ロールIDが設定されているか確認します。未設定の場合は管理者のみ実行できます。 |
