@@ -12,8 +12,8 @@ Ticket Tool連携のチケットリマインダーと講義スケジュール通
 1. Python 3.10以降をインストールします。
 2. PostgreSQL 12以降を用意し、Bot用のデータベースとユーザーを作成します。
 3. 仮想環境を作成・有効化し、`pip install -r requirements.txt` を実行します。
-4. `.env.example` を `.env` にコピーし、環境変数を設定します（次節参照）。
-   `RGA_DATABASE_URL` にはPostgreSQLの接続文字列を指定します。
+4. `.env.example` を `.env` に、`setting.example` を `.setting` にコピーして値を設定します
+   （次節参照）。`.env` には Bot のトークンとPostgreSQLの接続文字列を記載します。
 5. 監視対象カテゴリでBotに**チャンネルを見る**・**メッセージを送信**・
    **リンクを埋め込む**権限を付与します。運営用チャンネルへ送信する場合も同様に
    権限を付与します。講義案内を投稿するチャンネルにも同じ権限が必要です。
@@ -30,6 +30,21 @@ Message Content Intentを有効にせずに起動すると、Discordが接続を
 Botを再起動してください。
 
 ## 環境変数
+
+設定は2つのKEY=VALUE形式のファイルに分けて記載します。**トークンや接続文字列など
+秘密情報は `.env` に、それ以外の設定は `.setting` に**書きます。どちらも `.gitignore`
+対象のためリポジトリにはコミットしません。テンプレートは `.env.example` と
+`.setting.example` です。`RGA_REMINDER_CANCEL_TRIGGER=image` のような既定値と同値の
+行は、読みやすさのためテンプレートに入れていません。
+
+- `.env`: `DISCORD_TOKEN` / `RGA_DATABASE_URL` / `RGA_TEST_DATABASE_URL`
+- `.setting`: 上記以外のすべて
+
+どちらかのファイルが無くても起動できます（無い設定は省略値のみで動作し、必須項目
+が不足していれば起動時にエラーで終了します）。同名の変数を両方のファイルに書かない
+でください。
+
+※ 優先順: OSの環境変数 > `.setting` > `.env`
 
 | 変数 | 必須 | 既定値 | 説明 |
 |---|---|---|---|

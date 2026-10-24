@@ -50,13 +50,21 @@ fail if run from another directory.
   `python-dotenv`, and `psycopg[binary,pool]` are the only deps. Requires Python
   3.10+ (`int | None` syntax).
 
-## Config (`.env`, loaded by python-dotenv in `load_config`)
+## Config (`.env` + `.setting`, both KEY=VALUE, loaded by `load_env_files()` in `config.py`)
 
-- Required: `DISCORD_TOKEN`, `RGA_TICKET_CATEGORY_IDS`. `RGA_REMINDER_TRIGGER_TEXT`
-  is required only when `RGA_REMINDER_CANCEL_TRIGGER` is `keyword`.
+- **Secrets live in `.env`**: `DISCORD_TOKEN`, `RGA_DATABASE_URL`,
+  `RGA_TEST_DATABASE_URL`. **Deployment-specific settings live in `.setting`**:
+  everything else below. Templates: `.env.example` / `.setting.example`
+  (`.env` and `.setting` are gitignored).
+- Load order matters: OS environment variables win over both files, and
+  `.setting` wins over `.env` for duplicated keys (don't duplicate keys).
+  Missing files are fine; required keys missing → startup error.
+- Required: `DISCORD_TOKEN` (in `.env`), `RGA_TICKET_CATEGORY_IDS`.
+  `RGA_REMINDER_TRIGGER_TEXT` is required only when `RGA_REMINDER_CANCEL_TRIGGER`
+  is `keyword`.
 - Optional: `RGA_EXCLUDED_CHANNEL_IDS`; interval via `RGA_REMINDER_VALUE`
   (default `14`) + `RGA_REMINDER_UNIT` (`seconds|minutes|hours|days|weeks`,
-  default `days`); `RGA_DATABASE_URL` (**required**, PostgreSQL connection string).
+  default `days`).
 - Cancel condition: `RGA_REMINDER_CANCEL_TRIGGER` (`image` default | `keyword`,
   mutually exclusive). `image` cancels on a user message with an image file
   attachment; `keyword` cancels on an exact match of `RGA_REMINDER_TRIGGER_TEXT`
@@ -75,7 +83,8 @@ fail if run from another directory.
   enabled in the Developer Portal (the cancel trigger reads attachments, which
   Discord strips without it), otherwise `client.run` raises
   `PrivilegedIntentsRequired` (caught and logged in Japanese).
-- Don't read .env, instead of using .env.example.
+- Don't read `.env` or `.setting` (real per-deployment files); use
+  `.env.example` / `.setting.example` as reference.
 
 ## Behavior gotchas
 

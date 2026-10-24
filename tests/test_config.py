@@ -1,7 +1,10 @@
+import os
+import tempfile
 import unittest
 from datetime import timedelta
 
 from config import (
+    load_env_files,
     parse_cancel_trigger,
     parse_category_ids,
     parse_discord_ids,
@@ -139,6 +142,61 @@ class ExcludedChannelConfigTests(unittest.TestCase):
     def test_rejects_invalid_excluded_channel_ids(self) -> None:
         with self.assertRaises(ValueError):
             parse_discord_ids("100,nope", "RGA_EXCLUDED_CHANNEL_IDS", allow_empty=True)
+
+
+SPLIT_ENV_VARS = ("DISCORD_TOKEN", "RGA_REMINDER_VALUE")
+
+
+class LoadEnvFilesTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._saved = {name: os.environ.get(name) for name in SPLIT_ENV_VARS}
+        for name in SPLIT_ENV_VARS:
+            os.environ.pop(name, None)
+
+    def tearDown(self) -> None:
+        for name, value in self._saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+    def test_setting_file_wins_over_env_file_for_duplicated_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            setting_path = os.path.join(directory, ".setting")
+            env_path = os.path.join(directory, ".env")
+            with open(setting_path, "w", encoding="utf-8") as file:
+                file.write("RGA_REMINDER_VALUE=7\n")
+            with open(env_path, "w", encoding="utf-8") as file:
+                file.write("RGA_REMINDER_VALUE=14\nDISCORD_TOKEN=bot-token\n")
+
+            load_env_files(setting_path, env_path)
+
+            self.assertEqual(os.environ["RGA_REMINDER_VALUE"], "7")
+            self.assertEqual(os.environ["DISCORD_TOKEN"], "bot-token")
+
+    def test_process_environment_outranks_both_files(self) -> None:
+        os.environ["RGA_REMINDER_VALUE"] = "3"
+        with tempfile.TemporaryDirectory() as directory:
+            setting_path = os.path.join(directory, ".setting")
+            env_path = os.path.join(directory, ".env")
+            with open(setting_path, "w", encoding="utf-8") as file:
+                file.write("RGA_REMINDER_VALUE=7\n")
+            with open(env_path, "w", encoding="utf-8") as file:
+                file.write("RGA_REMINDER_VALUE=14\n")
+
+            load_env_files(setting_path, env_path)
+
+            self.assertEqual(os.environ["RGA_REMINDER_VALUE"], "3")
+
+    def test_missing_files_are_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            load_env_files(
+                os.path.join(directory, "absent-setting"),
+                os.path.join(directory, "absent-env"),
+            )
+
+            self.assertEqual(os.environ.get("DISCORD_TOKEN"), None)
+            self.assertEqual(os.environ.get("RGA_REMINDER_VALUE"), None)
 
 
 if __name__ == "__main__":
