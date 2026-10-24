@@ -3,9 +3,10 @@
 Ticket Tool連携のチケットリマインダーと講義スケジュール通知を行うDiscord Botです。
 設定したDiscordカテゴリ内のチャンネルが作成されると、その作成日時を起点に
 リマインダーを登録し、設定した時間が経過した後にチケットチャンネルや運営用
-チャンネルへ1回送信します。講義予定はスラッシュコマンドから登録でき、開始前に
-案内チャンネルへリマインダーを送信します。予定はPostgreSQLに保存され、Bot再起動後も
-引き継がれます。
+チャンネルへ1回送信します。運営向けの通知には、チケットでの申請有無の判定結果
+（「申請の確認」フィールド）を添付します。講義予定はスラッシュコマンドから登録でき、
+開始前に案内チャンネルへリマインダーを送信します。予定はPostgreSQLに保存され、
+Bot再起動後も引き継がれます。
 
 ## セットアップ
 
@@ -37,7 +38,8 @@ Botを再起動してください。
 `.setting.example` です。`RGA_REMINDER_CANCEL_TRIGGER=image` のような既定値と同値の
 行は、読みやすさのためテンプレートに入れていません。
 
-- `.env`: `DISCORD_TOKEN` / `RGA_DATABASE_URL` / `RGA_TEST_DATABASE_URL`
+- `.env`: `DISCORD_TOKEN` / `RGA_DATABASE_URL` / `RGA_TEST_DATABASE_URL` /
+  `RGA_JEV_API_KEY`（`jev` モード使用時）
 - `.setting`: 上記以外のすべて
 
 どちらかのファイルが無くても起動できます（無い設定は省略値のみで動作し、必須項目
@@ -67,6 +69,10 @@ Botを再起動してください。
 | `RGA_LECTURE_ROLE_IDS` | | 空 | 講義コマンドを実行できるロールID（カンマ区切り）。空の場合は管理者のみ。 |
 | `RGA_LECTURE_REMINDER_MINUTES` | | `15` | 講義開始の何分前にリマインダーを送るか。 |
 | `RGA_LECTURE_ANNOUNCE_CHANNEL_ID` | | 空 | 講義案内の既定投稿先チャンネル。`/lecture create` で個別指定も可能。 |
+| `RGA_APPLICATION_STATUS_MODE` | | `simple` | 運営向け通知の「申請の確認」の判定方式。`simple` / `jev` から選択します（「申請の確認」節参照）。 |
+| `RGA_JEV_API_KEY` | △ | — | Jev（thejevai.com）のAPIキー。`.env` に記載します。`RGA_APPLICATION_STATUS_MODE` が `jev` のとき必須（無いと起動時にエラーで終了します）。 |
+| `RGA_JEV_MODEL` | | `typesafe/jev-1.14` | Jevで使用するモデル。 |
+| `RGA_APPLICATION_STATUS_CONFIDENCE_THRESHOLD` | | `0.7` | Jev判定で確度が高いとみなす信頼度のしきい値（0〜1）。しきい値未満の結果は参考値として表示し、人による確認を推奨する注記を付けます。 |
 
 旧設定 `RGA_TICKET_CATEGORY_ID`（単一カテゴリ）と `RGA_REMINDER_DAYS` も
 引き続き利用できます。
@@ -224,6 +230,72 @@ python -m tools.retry --list     # 失敗状態を一覧表示
 すべて指定してください。文面を変更するとキャンセルが効かなくなる点に注意して
 ください。
 
+## 申請の確認
+
+運営向け通知（`RGA_REMINDER_TARGET` が `operations` / `both`）の
+「チケット確認リマインダー」には、**そのチケットでまだ誰も申請していないか**を
+示す「申請の確認」フィールドを追加します。チケットチャンネル向けの通知には
+表示されません。判定結果はリマインダーの送信・キャンセルとは独立して
+PostgreSQLに保存されるため、Botの再起動後も引き継がれます。
+
+判定方式は `RGA_APPLICATION_STATUS_MODE` で選びます。
+
+| モード | 判定方法 | 表示 |
+|---|---|---|
+| `simple`（既定） | 申請者の投稿に画像ファイルが添付されたかを確認 | `あり（添付画像検知）` / `なし（添付画像検知）` |
+| `jev` | Jev AI がチャンネル履歴から申請の有無を判定 | `未申請（信頼 0.90 / Jev）` など状態＋信頼度 |
+
+`jev` モードでも画像添付の検知は常時（メッセージ受信時に無料で）行い、Jev判定が
+失敗した場合のフォールバックとします。simple判定による画像検知は確実ではない
+（画像を貼る運用を守ってもらえない可能性がある）ため、`なし` の場合は添付画像を
+検知できていないだけの可能性がある点に注意してください。
+
+表示例の目安:
+
+- `あり（添付画像検知）`: 申請画像のファイル添付を検知しています。
+- `なし（添付画像検知）`: 申請画像のファイル添付を検知していません。
+- `未申請（信頼 0.90 / Jev）`: Jevが高い信頼度で「まだ申請していない」と判断しました。
+  判定は6時間ごとに更新されます。
+- `申請中（信頼 0.85 / Jev）`: 申請後の審査待ちと判断しました（`審査中` も同様の形式で表示します）。
+- `参考: 未申請の可能性（信頼 0.35 / Jev）※ 人による確認を推奨`: 信頼度が
+  しきい値（`RGA_APPLICATION_STATUS_CONFIDENCE_THRESHOLD`, 既定0.7）未満のため、
+  参考値として表示しています。
+- `あり（simple・フォールバック）`: `jev` モードでJev側に問題があり判定できず、
+  直近の画像添付検知にフォールバックした結果です。
+- `判断不能（信頼 0.30 / Jev）※ 人による確認を推奨`: 申請の有無が判断できません。
+
+### Jev判定のしくみ
+
+- 判定は6時間ごとに低頻度で実行します。メッセージごとには判定しないため、
+  通知時点の判定が最新の会話を反映していないことがあります。
+- Jevへはチャンネルの直近50メッセージ（本文は先頭2000字まで）を`state`として
+  送ります。画像ファイルそのものは送信せず、添付の種類・名前・サイズ
+  （メタデータ）のみを含めます。
+- BotやWebhookが投稿したメッセージは判定対象から除外します。Ticket Toolの投稿も
+  対象外です。
+- 空の履歴（内容も添付もないメッセージしかないチャンネル）は判定せず、
+  データベースも更新しません。
+- 判定に失敗した場合（API障害、タイムアウト、ペイロード上限など）は簡易判定に
+  フォールバックし、ログに記録します。フォールバックは画像添付を検知した場合に
+  だけ結果を上書きするため、確度の高い既存の判定を消すことがありません。
+
+### Jevを有効にする手順
+
+1. JevのAPIキーを用意します。Jev（thejevai.com）は**早期アクセス**段階のサービス
+   で、クレジットの消費や契約が必要な場合があります。利用規約と料金を確認したうえで、
+   PlaygroundからAPIキーを発行してください（APIドキュメント: https://thejevai.com/docs）。
+2. 日本語による申請の有無の判定精度が運用に足りるか、**Playgroundで事前に確認して**
+   から切り替えることを推奨します（実問い合わせの文面をそのまま試せます）。
+3. `.env` に `RGA_JEV_API_KEY=` を、`.setting` に `RGA_APPLICATION_STATUS_MODE=jev`
+   を設定します。`jev` モードでAPIキーが無い場合は**起動時にエラーで終了**します
+   （simpleモードのまま運用することもできます）。
+4. チャンネル履歴には個人情報が含まれる可能性があります。外部サービスへの送信が
+   運用ポリシー上問題ないか、事前に確認してください。
+
+注意: Jev判定はキャンセル条件と同様に**Message Content Intent**が有効である必要が
+あります（無効だと添付ファイルのメタデータが受信できず、簡易判定が正しく
+機能しません）。
+
 ## systemdによる運用
 
 `deploy/rga-assistant.service` を用意しています。パス・ユーザーは環境に合わせて
@@ -302,6 +374,8 @@ sudo systemctl start rga-assistant
 
 - `ticket_reminders` の `sent` / `cancelled`（関連する `reminder_deliveries` も連鎖削除）
 - 中止済み、またはリマインダーが `sent` / `expired` / `cancelled` の講義
+- `application_status`: 判定日時が保持期間より古く、かつチケットのリマインダーが
+  未完了（`pending` / `sending` / `error`）でない行
 
 `pending` や `error` の行は削除しないため、未送信のリマインダーが失われることは
 ありません。cron等での定期実行を推奨します。
@@ -344,6 +418,7 @@ python -m tools.migrate_sqlite path/to/legacy.sqlite3   # ファイルを指定�
 | `RGA_TICKET_CATEGORY_IDS ... must contain valid values.` | カテゴリIDが正の整数のカンマ区切りか確認します。 |
 | `RGA_OPERATIONS_CHANNEL_ID is required ...` | `RGA_REMINDER_TARGET` が `operations`/`both` のときは運営チャンネルIDを設定します。 |
 | `Set either RGA_OPERATIONS_MENTION_ROLE_ID or ...` | メンションはロールかユーザーのどちらか一方だけを設定します。 |
+| `RGA_JEV_API_KEY is required when RGA_APPLICATION_STATUS_MODE is jev.` | `jev` モードにはJevのAPIキーが必要です。`.env` に `RGA_JEV_API_KEY` を設定するか、モードを `simple` に戻します。 |
 | リマインダーが送信されない | Botに「チャンネルを見る」「メッセージを送信」「リンクを埋め込む」権限があるか確認します。`error` 状態なら `python -m tools.retry` で復旧します。 |
 | 画像やキーワードを送ったのに通知が来る | `RGA_REMINDER_CANCEL_TRIGGER` の設定と運用の合致を確認します。`image` なら、申請者の画像がファイルとして添付されているか（Bot/Webhook投稿やURLの埋め込みは対象外）を確認します。`keyword` なら、`RGA_REMINDER_TRIGGER_TEXT` が投稿本文と完全一致しているか確認します（複数ある場合はカンマ区切り）。 |
 | データベースが大きくなってきた | `python -m tools.purge` で保存期間を過ぎた終了分を削除します（`RGA_RETENTION_DAYS`）。 |

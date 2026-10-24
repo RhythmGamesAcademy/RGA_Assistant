@@ -213,6 +213,42 @@ Botの再起動後、データベースから未送信のリマインダーを�
 Ticket ToolのチケットIDは現行の検知方式では取得できないため、チャンネルID（主キー）を
 チケットの代替キーとして保存する。チャンネル名・開設日時・サーバーIDも併せて保存する。
 
+#### 3.1.10. 申請有無の判定（運営向け通知の補助情報）
+
+運営向けリマインダーには、該当チケットでまだ誰も申請していないかを示す
+「申請の確認」フィールドを添付する（チケットチャンネル向けの通知には含めない）。
+判定は監視対象カテゴリのチケットチャンネルを対象とし、リマインダーの
+登録・送信状態とは独立してPostgreSQLに保存するため、Bot再起動後も引き継がれる。
+
+判定方式は設定で選択する（既定は `simple` とし、特定の外部サービスが無い運用でも
+動作する）。
+
+| モード | 判定方式 |
+|---|---|
+| `simple`（既定） | 申請者の投稿に画像ファイル添付（MIME `image/*`）があったかで判定する。 |
+| `jev` | Jev AI（thejevai.com）がチャンネル履歴から申請の有無を判定する。 |
+
+- `simple`: リマインダーのキャンセル条件とは独立に、申請者の画像添付を常時検知して
+  記録する（Bot・Webhook投稿は対象外。Message Content Intent が前提）。
+  検知できた場合のみ情報が得られるため、`なし` 表示は補助的な値とする。
+- `jev`: `RGA_JEV_API_KEY`（`.env`）が必要で、不足時は **起動時にエラーで終了する**。
+  判定は6時間ごとの低頻度実行とし、メッセージごとには外部APIを呼び出さない。
+  Jevへはチャンネルの直近50メッセージ（本文は先頭2000字まで）を `state` として
+  送信し、画像ファイルそのものは送らない（添付のメタデータのみ）。
+  Bot・Webhookが投稿したメッセージは判定対象外とする。
+- Jevの判定は「未申請 / 申請中 / 審査中」と信頼度で表示する。信頼度が
+  `RGA_APPLICATION_STATUS_CONFIDENCE_THRESHOLD`（既定0.7）未満の場合や
+  判断不能の場合は、人による確認を推奨する注記付きの参考値として表示する。
+- Jevの通信失敗は HTTP 429/529 を指数バックオフで再試行し、それ以外は簡易判定に
+  フォールバックしてログに記録する。フォールバックは画像添付を検知した場合にのみ
+  保存するため、確度の高い既存の判定を弱い値で上書きしない。
+- 判定結果は `application_status` テーブル（チャンネルID・判定結果・モード・
+  詳細・判定日時）に保存する。判定日時が `RGA_RETENTION_DAYS` を過ぎた行は
+  `python -m tools.purge` で削除する（未完了のリマインダーを持つチケットの行は残す）。
+- Jevは早期アクセスの外部サービスであるため、本運用への切り替え前にPlaygroundで
+  日本語判定の精度と、個人情報を含む履歴の外部送信に関する運用ポリシーを
+  確認すること。
+
 ### 3.2. 講義スケジュール管理・通知
 
 **優先度：中**
@@ -347,13 +383,15 @@ Ticket ToolのチケットIDは現行の検知方式では取得できないた�
 
 機能追加の影響範囲を限定しつつ運用しやすさを優先し、現行実装はフラットなモジュール
 構成を採用する。`main.py`（Bot本体・チケットリマインダー）、`lecture.py`
-（講義スケジュール）、`database.py`（PostgreSQLアクセス）、`config.py`（設定）、
-`embeds.py`（埋め込み表示の共通定義）に責務を分ける。
+（講義スケジュール）、`application.py`（申請有無の判定）、`database.py`
+（PostgreSQLアクセス）、`config.py`（設定）、`embeds.py`（埋め込み表示の共通定義）
+に責務を分ける。
 
 ```text
 rga-assistant/
 ├── main.py            # エントリポイント、チケットリマインダー
 ├── lecture.py         # 講義スケジュール機能
+├── application.py     # 申請有無の判定（simple / Jev AI）
 ├── embeds.py          # 埋め込み(Embed)と色の共通定義
 ├── config.py          # 環境変数の読み込み
 ├── database.py        # PostgreSQLアクセス層
@@ -425,6 +463,7 @@ READMEには以下を記載する。
 - 再起動後の復旧
 - 通知失敗時の再試行
 - 実際のチケットを使った動作テスト
+- 運営向け通知への申請有無の表示（3.1.10、既定はsimple、Jevモードは設定時に選択）
 
 ### Phase 3：講義スケジュール機能（実装済み）
 
@@ -471,6 +510,10 @@ READMEには以下を記載する。
 - [ ] 保存期間を過ぎた終了済みデータを `python -m tools.purge` で削除できる。※本環境からは接続先DBに到達できず `--dry-run` 実行確認が未達（接続タイムアウト）。構造は静的確認済み（`tools/purge.py`、`database.py` `purge_old`: `sent`/`cancelled` のみ削除、`reminder_deliveries` は CASCADE）。
 - [x] 秘密情報がリポジトリに含まれていない。（`.gitignore` に `.env`/`.setting`/`data/`、`git ls-files` では `.env.example`/`.setting.example` のみ追跡、記載値はプレースホルダ）
 - [x] READMEに連携設定・起動・停止方法、バックアップと復旧手順が記載されている。（README.md: 環境変数・「Ticket Toolとの連携設定」「systemdによる運用」「データベース」節の `pg_dump`/`pg_restore`/復旧後確認手順）
+- [ ] 運営向けリマインダーに申請の有無（申請の確認フィールド）が表示される。※コード・テストでは `build_application_status_field` と `build_delivery_message`（`tests/test_messages.py`）を確認済み。実チケットでの表示は未確認。
+- [ ] `RGA_APPLICATION_STATUS_MODE=jev` 選択時に起動が失敗しない。※APIキー必須の検証と、Jev判定の一連の動作はユニットテスト（`tests/test_application.py`、外部通信はモック）で確認済み。実APIキーでの起動・判定・フォールバックは未確認。
+- [ ] Jev判定の信頼度が既定0.7未満のとき、人による確認を推奨する注記付きの参考値として表示される。（`application.py` `build_application_status_field`、`tests/test_messages.py` で表示文面を確認）
+- [ ] 申請判定データが `python -m tools.purge` の対象になる。※`--dry-run` の実行確認はDB接続の都合で未達（接続タイムアウト）。`tools/purge.py` と `ApplicationStatusDatabase.count_purgeable`/`purge_old` の構造は静的確認済み。
 
 ## 12. 未決定事項
 
