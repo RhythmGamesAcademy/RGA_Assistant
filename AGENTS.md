@@ -27,9 +27,11 @@ cogs, or service layers.
   state into PostgreSQL (`ON CONFLICT DO NOTHING`).
 - `deploy/rga-assistant.service` — systemd unit template.
 - `specification.md` — aspirational multi-phase spec. **Phases 2 (ticket
-  reminder) and 3 (lecture schedule) are implemented.** Inquiry classification
-  (Phase 4) and task-management integration (Phase 5) do NOT exist. Don't
-  scaffold them unless asked.
+  reminder) and 3 (lecture schedule) are implemented.** Application-image
+  instant notification (Phase 4, rescoped 2026-10-25 from inquiry
+  classification) and TodoTODO REST integration (Phase 5) do NOT exist. Don't
+  scaffold them unless asked. Phase 5 starts only after the ops team actually
+  adopts the TodoTODO app.
 
 ## Environment and commands
 
