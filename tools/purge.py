@@ -7,8 +7,11 @@ Usage (run from the repository root, after setting ``RGA_DATABASE_URL``):
     python -m tools.purge --dry-run   # only report what would be deleted
 
 Only finished rows are removed: ticket reminders in ``sent``/``cancelled`` and
-lectures that are cancelled or whose reminder reached a terminal state. Pending
-and errored reminders are kept so the retry tooling can still process them.
+lectures that are cancelled or whose reminder reached a terminal state.
+Pending and errored reminders are kept so the retry tooling can still process
+them. Application status rows (Issue #5) are removed once ``judged_at`` passes
+the cutoff and their ticket is closed or no longer tracked; rows belonging to
+open reminders are kept.
 """
 
 import argparse
@@ -19,6 +22,7 @@ from datetime import datetime, timedelta, timezone
 
 from config import Config, load_config
 from database import (
+    ApplicationStatusDatabase,
     LectureDatabase,
     ReminderDatabase,
     ensure_compatible_event_loop_policy,
@@ -47,24 +51,30 @@ async def run(args: argparse.Namespace, config: Config) -> int:
         # CLI is safe to run from cron while the bot is up.
         reminders = build_reminder_database(config, pool)
         lectures = LectureDatabase(pool)
+        applications = ApplicationStatusDatabase(pool)
         await reminders.ensure_schema()
         await lectures.ensure_schema()
+        await applications.ensure_schema()
 
         if args.dry_run:
             reminder_count = await reminders.count_purgeable(cutoff)
             lecture_count = await lectures.count_purgeable(cutoff)
+            application_count = await applications.count_purgeable(cutoff)
             print(
                 f"{days}日より古い終了分: "
-                f"チケットリマインダー {reminder_count}件 / 講義 {lecture_count}件"
+                f"チケットリマインダー {reminder_count}件 / 講義 {lecture_count}件 / "
+                f"申請記録 {application_count}件"
                 "（--dry-run のため削除していません）。"
             )
             return 0
 
         reminder_count = await reminders.purge_old(cutoff)
         lecture_count = await lectures.purge_old(cutoff)
+        application_count = await applications.purge_old(cutoff)
         print(
             f"{days}日より古い終了分を削除しました: "
-            f"チケットリマインダー {reminder_count}件 / 講義 {lecture_count}件。"
+            f"チケットリマインダー {reminder_count}件 / 講義 {lecture_count}件 / "
+            f"申請記録 {application_count}件。"
         )
         return 0
     finally:
@@ -74,7 +84,8 @@ async def run(args: argparse.Namespace, config: Config) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="保存期間を過ぎた終了済みデータを削除します。"
-        " 対象は sent/cancelled のチケットリマインダーと、中止または送信済みの講義です。"
+        " 対象は sent/cancelled のチケットリマインダー、中止または送信済みの講義、"
+        "および保存期間を過ぎた申請記録（未終了のリマインダーを持つ申請記録を除く）です。"
     )
     parser.add_argument(
         "--days",

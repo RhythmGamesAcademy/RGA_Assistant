@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 import discord
 
+from application import build_application_status_field
 from config import Config
 from main import (
     build_delivery_message,
@@ -15,6 +16,10 @@ from main import (
 )
 
 OPENED_AT = datetime(2026, 10, 1, 15, 0, tzinfo=timezone(timedelta(hours=9)))
+
+
+def find_field(embed: discord.Embed, name: str):
+    return next((f for f in embed.fields if f.name == name), None)
 
 
 def make_config(**overrides) -> Config:
@@ -194,6 +199,99 @@ class DeliveryMessageTests(unittest.TestCase):
         self.assertFalse(allowed.everyone)
         self.assertFalse(allowed.roles)
         self.assertFalse(allowed.users)
+
+    def test_ticket_delivery_has_no_application_status_field(self) -> None:
+        row = {"channel_id": "10", "has_application": True, "mode": "simple"}
+        _, embed, _ = build_delivery_message(
+            make_delivery(), make_config(), application_status=row
+        )
+        self.assertIsNone(find_field(embed, "申請の確認"))
+
+
+class ApplicationStatusFieldTests(unittest.TestCase):
+    def field_names_and_values(self, embed: discord.Embed) -> list[tuple[str, str]]:
+        return [(f.name, f.value) for f in embed.fields]
+
+    def test_operations_reminder_embed_adds_field_when_given(self) -> None:
+        embed = build_operations_reminder_embed(
+            "support-1",
+            OPENED_AT,
+            14,
+            "20",
+            "10",
+            application_status_field="あり（添付画像検知）",
+        )
+        fields = self.field_names_and_values(embed)
+        self.assertIn(("申請の確認", "あり（添付画像検知）"), fields)
+
+    def test_operations_reminder_embed_has_no_field_when_absent(self) -> None:
+        embed = build_operations_reminder_embed(
+            "support-1", OPENED_AT, 14, "20", "10"
+        )
+        self.assertNotIn("申請の確認", [name for name, _ in self.field_names_and_values(embed)])
+
+    def test_simple_row_shows_attachment_evidence_basis(self) -> None:
+        # A stored row from simple criteria (e.g. on_message evidence or a
+        # fallback) while jev is configured is labelled as the fallback.
+        row = {"channel_id": "10", "has_application": True, "mode": "simple"}
+        value = build_application_status_field(row, "jev", 0.7)
+        self.assertEqual(value, "あり（simple・フォールバック）")
+
+    def test_no_row_in_simple_mode_shows_no_evidence(self) -> None:
+        value = build_application_status_field(None, "simple", 0.7)
+        self.assertEqual(value, "なし（添付画像検知）")
+
+    def test_confident_jev_row_shows_state_and_confidence(self) -> None:
+        row = {
+            "channel_id": "10",
+            "has_application": False,
+            "mode": "jev",
+            "detail": {
+                "application_state": "未申請",
+                "confidence": 0.9,
+            },
+        }
+        value = build_application_status_field(row, "jev", 0.7)
+        self.assertEqual(value, "未申請（信頼 0.90 / Jev）")
+
+    def test_low_confidence_jev_row_marks_human_review(self) -> None:
+        row = {
+            "channel_id": "10",
+            "has_application": None,
+            "mode": "jev",
+            "detail": {
+                "application_state": "申請中",
+                "confidence": 0.4,
+            },
+        }
+        value = build_application_status_field(row, "jev", 0.7)
+        self.assertIn("参考: 申請中の可能性", value)
+        self.assertIn("信頼 0.40 / Jev", value)
+        self.assertIn("※ 人による確認を推奨", value)
+
+    def test_operations_delivery_passes_application_status(self) -> None:
+        row = {
+            "channel_id": "10",
+            "has_application": True,
+            "mode": "simple",
+            "detail": None,
+        }
+        config = make_config(reminder_targets=("ticket", "operations"))
+        _, embed, _ = build_delivery_message(
+            make_delivery(target="operations"), config, application_status=row
+        )
+        field = find_field(embed, "申請の確認")
+        self.assertIsNotNone(field)
+        self.assertEqual(field.value, "あり（添付画像検知）")
+
+    def test_operations_delivery_without_status_shows_default(self) -> None:
+        config = make_config(reminder_targets=("ticket", "operations"))
+        _, embed, _ = build_delivery_message(
+            make_delivery(target="operations"), config
+        )
+        field = find_field(embed, "申請の確認")
+        self.assertIsNotNone(field)
+        self.assertEqual(field.value, "なし（添付画像検知）")
 
 
 if __name__ == "__main__":

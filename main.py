@@ -2,13 +2,24 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+import aiohttp
 import discord
 import psycopg
 from discord import app_commands
 from discord.ext import tasks
 
+from application import (
+    JEV_MODE,
+    SIMPLE_MODE,
+    JevApplicationJudge,
+    JevApplicationScheduler,
+    build_application_status_field,
+    fetch_lean_history,
+    history_has_image_attachment,
+)
 from config import Config, load_config
 from database import (
+    ApplicationStatusDatabase,
     LectureDatabase,
     ReminderDatabase,
     ensure_compatible_event_loop_policy,
@@ -47,6 +58,32 @@ def message_has_image_attachment(
         content_type is not None and content_type.startswith("image/")
         for content_type in attachment_content_types
     )
+
+
+def message_carries_application_evidence(
+    attachment_content_types: tuple[str | None, ...],
+    channel_category_id: int | None,
+    configured_category_ids: tuple[int, ...],
+    channel_id: int,
+    excluded_channel_ids: tuple[int, ...],
+) -> bool:
+    """True when a user message carries an image attachment in a monitored
+    ticket channel (Issue #5 application detection).
+
+    This is deliberately independent of the reminder cancel trigger mode
+    (``RGA_REMINDER_CANCEL_TRIGGER``): in ``keyword`` mode, attaching an image
+    still counts as application evidence. Bot and webhook messages (Ticket
+    Tool postings) never reach here because ``on_message`` rejects them, the
+    same basis as the cancel judgment.
+    """
+    if not is_monitored_channel(
+        channel_category_id,
+        channel_id,
+        configured_category_ids,
+        excluded_channel_ids,
+    ):
+        return False
+    return message_has_image_attachment(attachment_content_types)
 
 
 def is_reminder_cancel_message(
@@ -118,6 +155,7 @@ def build_operations_reminder_embed(
     days: int,
     guild_id: str,
     channel_id: str,
+    application_status_field: str | None = None,
 ) -> discord.Embed:
     opened_at_jst = opened_at.astimezone(JST)
     embed = discord.Embed(
@@ -137,6 +175,12 @@ def build_operations_reminder_embed(
         value=f"https://discord.com/channels/{guild_id}/{channel_id}",
         inline=False,
     )
+    if application_status_field:
+        embed.add_field(
+            name="申請の確認",
+            value=truncate(application_status_field, MAX_FIELD_VALUE),
+            inline=False,
+        )
     return embed
 
 
@@ -157,9 +201,15 @@ def _mention_rules(role_id: int | None, user_id: int | None) -> discord.AllowedM
 
 
 def build_delivery_message(
-    delivery: dict[str, Any], config: Config
+    delivery: dict[str, Any],
+    config: Config,
+    application_status: dict[str, Any] | None = None,
 ) -> tuple[str | None, discord.Embed, discord.AllowedMentions]:
-    """Build the content, embed, and mention rules for one reminder delivery."""
+    """Build the content, embed, and mention rules for one reminder delivery.
+
+    ``application_status`` is the stored ``application_status`` row of the
+    ticket (or None); only the operations embed shows the 申請の確認 field.
+    """
     opened_at = delivery["opened_at"]
     days = elapsed_days(opened_at)
     if delivery["target"] == "operations":
@@ -173,6 +223,11 @@ def build_delivery_message(
                 days,
                 delivery["guild_id"],
                 delivery["channel_id"],
+                application_status_field=build_application_status_field(
+                    application_status,
+                    config.application_status_mode,
+                    config.application_status_confidence_threshold,
+                ),
             ),
             _mention_rules(role_id, user_id),
         )
@@ -398,6 +453,9 @@ class RGAAssistant(discord.Client):
         self.pool = None
         self.database: ReminderDatabase | None = None
         self.lecture_database: LectureDatabase | None = None
+        self.application_database: ApplicationStatusDatabase | None = None
+        self.jev_session: aiohttp.ClientSession | None = None
+        self.jev_scheduler: JevApplicationScheduler | None = None
         self.tree = app_commands.CommandTree(self)
         self.lecture_scheduler: LectureScheduler | None = None
 
@@ -413,6 +471,7 @@ class RGAAssistant(discord.Client):
             retry_max_attempts=self.config.retry_max_attempts,
         )
         self.lecture_database = LectureDatabase(self.pool)
+        self.application_database = ApplicationStatusDatabase(self.pool)
         await self.database.initialize()
         await self.lecture_database.initialize()
         self.lecture_scheduler = LectureScheduler(
@@ -427,9 +486,27 @@ class RGAAssistant(discord.Client):
             logger.info("Synced %s application commands", len(synced))
         except discord.HTTPException:
             logger.exception("Failed to sync application commands")
+        if self.config.application_status_mode == JEV_MODE:
+            # Jev judgments share one HTTP session over the bot's whole life.
+            self.jev_session = aiohttp.ClientSession()
+            self.jev_scheduler = JevApplicationScheduler(
+                self,
+                self.application_database,
+                JevApplicationJudge(
+                    self.config.jev_api_key,
+                    self.config.jev_model,
+                ),
+                self.jev_session,
+                confidence_threshold=self.config.application_status_confidence_threshold,
+                is_monitored_channel=self._is_monitored_ticket_channel,
+            )
+            self.jev_scheduler.start()
 
     async def close(self) -> None:
         logger.info("Shutting down RGA Assistant")
+        if self.jev_session is not None:
+            await self.jev_session.close()
+            self.jev_session = None
         if self.pool is not None:
             await self.pool.close()
             self.pool = None
@@ -453,6 +530,11 @@ class RGAAssistant(discord.Client):
             self.config.lecture_announce_channel_id,
             self.config.lecture_reminder_minutes,
             self.config.lecture_role_ids,
+        )
+        logger.info(
+            "Application status mode: %s (confidence threshold=%s)",
+            self.config.application_status_mode,
+            self.config.application_status_confidence_threshold,
         )
         scanned = 0
         for guild in self.guilds:
@@ -513,7 +595,19 @@ class RGAAssistant(discord.Client):
         ):
             return
 
-        if self._matches_trigger(message):
+        content_types = tuple(
+            attachment.content_type for attachment in message.attachments
+        )
+        # Issue #5: application detection shares this hook so the message is
+        # never fetched twice. It is independent from the cancel trigger mode.
+        # In `jev` mode the inline image evidence is recorded too: it is free
+        # (local criteria) and Jev cannot see image files, only their metadata.
+        if self._is_monitored_ticket_channel(message.channel) and (
+            message_has_image_attachment(content_types)
+        ):
+            await self._record_application_image(message.channel.id)
+
+        if self._matches_trigger(message, content_types):
             if await self.database.cancel(message.channel.id):
                 logger.info(
                     "Cancelled ticket reminder after %s trigger in channel %s",
@@ -521,9 +615,27 @@ class RGAAssistant(discord.Client):
                     message.channel.id,
                 )
 
-    def _matches_trigger(self, message: discord.Message) -> bool:
+    async def _record_application_image(self, channel_id: int) -> None:
+        """Record the simple criteria: an image attached by a user."""
+        try:
+            await self.application_database.save(
+                channel_id,
+                has_application=True,
+                mode=SIMPLE_MODE,
+                detail=None,
+            )
+        except psycopg.Error:
+            logger.exception(
+                "Failed to record application evidence for channel %s", channel_id
+            )
+
+    def _matches_trigger(
+        self,
+        message: discord.Message,
+        content_types: tuple[str | None, ...],
+    ) -> bool:
         return is_reminder_cancel_message(
-            tuple(attachment.content_type for attachment in message.attachments),
+            content_types,
             message.content,
             message.channel.category_id,
             self.config.ticket_category_ids,
@@ -576,6 +688,32 @@ class RGAAssistant(discord.Client):
         else:
             logger.info(
                 "Reminder already exists for channel_id=%s",
+                channel.id,
+            )
+        await self._scan_application_evidence(channel)
+
+    async def _scan_application_evidence(
+        self, channel: discord.TextChannel
+    ) -> None:
+        """simple mode: scan the history once at registration time.
+
+        Messages posted while the bot was offline are missed by the live
+        ``on_message`` hook, so registration (startup scan, channel creation,
+        category move) recovers any image evidence they may carry.
+        """
+        if self.config.application_status_mode != SIMPLE_MODE:
+            return
+        try:
+            history = await fetch_lean_history(channel)
+        except discord.HTTPException:
+            logger.exception(
+                "Failed to scan application evidence for channel %s", channel.id
+            )
+            return
+        if history_has_image_attachment(history):
+            await self._record_application_image(channel.id)
+            logger.info(
+                "Recorded application evidence from history: channel_id=%s",
                 channel.id,
             )
 
@@ -661,7 +799,20 @@ class RGAAssistant(discord.Client):
         if not await self.database.is_sending(delivery["channel_id"], target):
             return
 
-        content, embed, allowed_mentions = build_delivery_message(delivery, self.config)
+        application_status = None
+        if target == "operations":
+            try:
+                application_status = await self.application_database.get(
+                    delivery["channel_id"]
+                )
+            except psycopg.Error:
+                logger.exception(
+                    "Failed to load application status for ticket %s",
+                    delivery["channel_id"],
+                )
+        content, embed, allowed_mentions = build_delivery_message(
+            delivery, self.config, application_status
+        )
 
         try:
             sent_message = await channel.send(
