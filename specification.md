@@ -458,17 +458,19 @@ READMEには以下を記載する。
 
 ## 11. 初期リリースの受け入れ条件
 
-- [ ] Botが正常に起動し、Discordへ接続できる。
-- [ ] Ticket Toolでチケットが開かれた際に自動検知できる。
-- [ ] チケット情報とリマインダー予定がデータベースに保存される。
-- [ ] 開設から14日後に、対象チケットのリマインダーが送信される。
-- [ ] 14日以内にクローズされたチケットにはリマインダーを送信しない（クローズは画像添付またはキーワード完全一致、チャンネル削除で検知。`RGA_REMINDER_CANCEL_TRIGGER` で選択する）。
-- [ ] 同じチケットに対して通知が二重送信されない。
-- [ ] Botの再起動後も予定が保持される。
-- [ ] 通知失敗時に原因をログから確認できる。
-- [ ] 保存期間を過ぎた終了済みデータを `python -m tools.purge` で削除できる。
-- [ ] 秘密情報がリポジトリに含まれていない。
-- [ ] READMEに連携設定・起動・停止方法、バックアップと復旧手順が記載されている。
+以下は 2026-10-25 時点の検証結果（Phase 2・3 実装済みコード・テスト・README に基づく静的確認）。DB 結合テストは `RGA_TEST_DATABASE_URL` 未設定のため本環境では未実行。
+
+- [ ] Botが正常に起動し、Discordへ接続できる。※静的確認のみ（`main.py` の `main()`/`setup_hook`/`on_ready`、README の起動手順）。実機環境での起動・Gateway接続確認が未実施。
+- [x] Ticket Toolでチケットが開かれた際に自動検知できる。（`main.py`: `on_ready` スキャン・`on_guild_channel_create`・`on_guild_channel_update` → `is_monitored_channel`、`tests/test_trigger.py`）
+- [x] チケット情報とリマインダー予定がデータベースに保存される。（`database.py`: `ticket_reminders`/`reminder_deliveries` スキーマと `register()`）
+- [x] 開設から14日後に、対象チケットのリマインダーが送信される。（`config.py` 既定 `RGA_REMINDER_VALUE=14`+`days`、`main.py` `reminder_loop`→`claim_due`→`_send_delivery`、`tests/test_messages.py`）
+- [x] 14日以内にクローズされたチケットにはリマインダーを送信しない（クローズは画像添付またはキーワード完全一致、チャンネル削除で検知。`RGA_REMINDER_CANCEL_TRIGGER` で選択する）。（`main.py` `is_reminder_cancel_message`/`on_guild_channel_delete`、`database.py` `cancel()`、`config.py` `parse_cancel_trigger`、`tests/test_trigger.py` で両モード確認）
+- [x] 同じチケットに対して通知が二重送信されない。（`database.py` `claim_due` の `FOR UPDATE SKIP LOCKED`＋`pending→sending` 遷移、`register` の `ON CONFLICT DO NOTHING`、送信前の `is_sending` 再確認）
+- [x] Botの再起動後も予定が保持される。（PostgreSQL 永続化、`database.py` `initialize()` が `sending→pending` を復元。`tests/test_database.py` に対応テストあり）
+- [x] 通知失敗時に原因をログから確認できる。（`main.py` `_record_failure` の `logger.error`、`database.py` `fail_delivery` の `last_error` 保存、失敗通知と `/rga failures` 一覧）
+- [ ] 保存期間を過ぎた終了済みデータを `python -m tools.purge` で削除できる。※本環境からは接続先DBに到達できず `--dry-run` 実行確認が未達（接続タイムアウト）。構造は静的確認済み（`tools/purge.py`、`database.py` `purge_old`: `sent`/`cancelled` のみ削除、`reminder_deliveries` は CASCADE）。
+- [x] 秘密情報がリポジトリに含まれていない。（`.gitignore` に `.env`/`.setting`/`data/`、`git ls-files` では `.env.example`/`.setting.example` のみ追跡、記載値はプレースホルダ）
+- [x] READMEに連携設定・起動・停止方法、バックアップと復旧手順が記載されている。（README.md: 環境変数・「Ticket Toolとの連携設定」「systemdによる運用」「データベース」節の `pg_dump`/`pg_restore`/復旧後確認手順）
 
 ## 12. 未決定事項
 
