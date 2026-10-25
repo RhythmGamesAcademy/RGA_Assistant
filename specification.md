@@ -3,7 +3,7 @@
 **プロジェクト名：** RGA Assistant  
 **対象組織：** Rhythm Games Academy（RGA）  
 **バージョン：** 1.2.0  
-**ステータス：** Phase 1〜3 実装済み（Phase 4・5 は未着手）
+**ステータス：** Phase 1〜4 実装済み（Phase 5 は未着手）
 
 ## 1. 概要
 
@@ -434,12 +434,14 @@ READMEには以下を記載する。
 - リマインダー
 - 再起動後の復旧
 
-### Phase 4：お問い合わせ自動分類
+### Phase 4：申請画像の即時通知（実装済み）
 
-- 分類カテゴリの確定
-- ルールベースの分類
-- 運営への振り分け
-- 分類結果の修正機能
+- 監視カテゴリ内の申請画像（`image/*` 添付）の検知
+- 運営チャンネルへのチケットリンク・画像の即時通知
+- チケットごとの初回通知のみ送信
+- Bot・Webhook投稿の除外
+
+お問い合わせの自動分類は、チケット種別が多様化した時点で改めて設計する。
 
 ### Phase 5：タスク管理ツール連携
 
@@ -468,6 +470,7 @@ READMEには以下を記載する。
 - [x] 同じチケットに対して通知が二重送信されない。（`database.py` `claim_due` の `FOR UPDATE SKIP LOCKED`＋`pending→sending` 遷移、`register` の `ON CONFLICT DO NOTHING`、送信前の `is_sending` 再確認）
 - [x] Botの再起動後も予定が保持される。（PostgreSQL 永続化、`database.py` `initialize()` が `sending→pending` を復元。`tests/test_database.py` に対応テストあり）
 - [x] 通知失敗時に原因をログから確認できる。（`main.py` `_record_failure` の `logger.error`、`database.py` `fail_delivery` の `last_error` 保存、失敗通知と `/rga failures` 一覧）
+- [x] チケット内の申請画像を運営へ即時通知できる。（`main.py` `on_message`、`database.py` `application_image_notifications`）
 - [ ] 保存期間を過ぎた終了済みデータを `python -m tools.purge` で削除できる。※本環境からは接続先DBに到達できず `--dry-run` 実行確認が未達（接続タイムアウト）。構造は静的確認済み（`tools/purge.py`、`database.py` `purge_old`: `sent`/`cancelled` のみ削除、`reminder_deliveries` は CASCADE）。
 - [x] 秘密情報がリポジトリに含まれていない。（`.gitignore` に `.env`/`.setting`/`data/`、`git ls-files` では `.env.example`/`.setting.example` のみ追跡、記載値はプレースホルダ）
 - [x] READMEに連携設定・起動・停止方法、バックアップと復旧手順が記載されている。（README.md: 環境変数・「Ticket Toolとの連携設定」「systemdによる運用」「データベース」節の `pg_dump`/`pg_restore`/復旧後確認手順）
@@ -477,7 +480,7 @@ READMEには以下を記載する。
 | 項目 | 決定内容 |
 |---|---|
 | タスク管理連携 | 連携先とAPIの仕様 |
-| お問い合わせ自動分類 | 分類カテゴリ・分類ルール・振り分け先の確定 |
+| お問い合わせ自動分類 | チケット種別が多様化した時点で分類カテゴリ・分類ルール・振り分け先を確定 |
 
 データ保存期間は90日（`RGA_RETENTION_DAYS`）とし、`python -m tools.purge` で削除する
 方針に確定した。

@@ -56,7 +56,7 @@ Botを再起動してください。
 | `RGA_REMINDER_VALUE` | | `14` | リマインダーまでの時間。 |
 | `RGA_REMINDER_UNIT` | | `days` | `seconds`/`minutes`/`hours`/`days`/`weeks`。 |
 | `RGA_REMINDER_TARGET` | | `ticket` | 送信先。`ticket`/`operations`/`both`。 |
-| `RGA_OPERATIONS_CHANNEL_ID` | △ | 空 | 運営用チャンネルID。`operations`/`both`では必須。失敗通知先も兼ねます。 |
+| `RGA_OPERATIONS_CHANNEL_ID` | △ | 空 | 運営用チャンネルID。`operations`/`both`では必須。申請画像の即時通知・失敗通知先も兼ねます。 |
 | `RGA_OPERATIONS_MENTION_ROLE_ID` | | 空 | 運営向け通知でメンションするロールID。 |
 | `RGA_OPERATIONS_MENTION_USER_ID` | | 空 | 運営向け通知でメンションするユーザーID。`RGA_OPERATIONS_MENTION_ROLE_ID` とは併用できません。 |
 | `RGA_RETRY_BASE_SECONDS` | | `60` | 送信失敗時の再試行間隔の基準（秒）。 |
@@ -97,6 +97,11 @@ Botを再起動してください。
 - `operations`：運営用チャンネルへ、チケットへのリンクを含む運営向けの文面で送信します。
 - `both`：両方へ、それぞれ別の文面で送信します。片方だけ成功しても送信済みの
   分は再送されません。
+
+監視対象チケットに申請画像（MIME `image/*` の添付）が投稿されると、リマインダーの
+状態に関係なく、`RGA_OPERATIONS_CHANNEL_ID` へチケットリンクと画像を即時通知します。
+同じチケットでは最初の1件だけ通知します。運営用チャンネルが未設定または送信に失敗
+した場合は、次の画像投稿で再試行されます。
 
 送信先の設定は**予定の登録時点**で確定します。`RGA_REMINDER_TARGET` を変更すると、
 以後に登録されるチケットから新しい設定が適用されます。

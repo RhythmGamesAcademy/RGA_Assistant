@@ -212,6 +212,29 @@ def build_failure_notification_embed(
     return embed
 
 
+def build_application_image_notification_embed(
+    channel_name: str,
+    guild_id: str,
+    channel_id: str,
+    image_url: str,
+) -> discord.Embed:
+    embed = discord.Embed(
+        title="申請画像を検知しました",
+        description=(
+            f"チケット **{discord.utils.escape_markdown(channel_name)}** に"
+            "申請画像が投稿されました。"
+        ),
+        color=COLOR_INFO,
+    )
+    embed.add_field(
+        name="チケット",
+        value=f"https://discord.com/channels/{guild_id}/{channel_id}",
+        inline=False,
+    )
+    embed.set_image(url=image_url)
+    return embed
+
+
 def build_failure_list_embed(rows: list[dict[str, Any]]) -> discord.Embed:
     if not rows:
         return discord.Embed(
@@ -508,10 +531,14 @@ class RGAAssistant(discord.Client):
     async def on_message(self, message: discord.Message) -> None:
         if (
             message.author.bot
+            or message.webhook_id is not None
             or message.guild is None
             or not isinstance(message.channel, discord.TextChannel)
         ):
             return
+
+        if self._has_image_attachment(message):
+            await self._notify_application_image(message)
 
         if self._matches_trigger(message):
             if await self.database.cancel(message.channel.id):
@@ -531,6 +558,98 @@ class RGAAssistant(discord.Client):
             self.config.excluded_channel_ids,
             self.config.cancel_trigger,
             self.config.reminder_trigger_texts,
+        )
+
+    def _has_image_attachment(self, message: discord.Message) -> bool:
+        return self._is_monitored_ticket_channel(
+            message.channel
+        ) and message_has_image_attachment(
+            tuple(attachment.content_type for attachment in message.attachments)
+        )
+
+    async def _notify_application_image(self, message: discord.Message) -> None:
+        operations_channel_id = self.config.operations_channel_id
+        if operations_channel_id is None:
+            logger.error(
+                "Cannot notify application image for ticket %s: "
+                "operations channel is not configured",
+                message.channel.id,
+            )
+            return
+
+        image = next(
+            (
+                attachment
+                for attachment in message.attachments
+                if attachment.content_type is not None
+                and attachment.content_type.startswith("image/")
+            ),
+            None,
+        )
+        if image is None:
+            return
+        try:
+            claimed = await self.database.claim_application_image_notification(
+                message.channel.id
+            )
+        except psycopg.Error:
+            logger.exception(
+                "Failed to claim application image notification for ticket %s",
+                message.channel.id,
+            )
+            return
+        if not claimed:
+            return
+
+        try:
+            channel = await self.fetch_channel(operations_channel_id)
+            if not isinstance(channel, discord.TextChannel):
+                raise TypeError("operations destination is not a text channel")
+            await channel.send(
+                content=build_mention(
+                    self.config.operations_mention_role_id,
+                    self.config.operations_mention_user_id,
+                ),
+                embed=build_application_image_notification_embed(
+                    message.channel.name,
+                    str(message.guild.id),
+                    str(message.channel.id),
+                    image.url,
+                ),
+                allowed_mentions=_mention_rules(
+                    self.config.operations_mention_role_id,
+                    self.config.operations_mention_user_id,
+                ),
+            )
+        except (discord.HTTPException, TypeError):
+            try:
+                await self.database.release_application_image_notification(
+                    message.channel.id
+                )
+            except psycopg.Error:
+                logger.exception(
+                    "Failed to release application image notification claim for %s",
+                    message.channel.id,
+                )
+            logger.exception(
+                "Failed to notify operations about application image in ticket %s",
+                message.channel.id,
+            )
+            return
+
+        try:
+            await self.database.mark_application_image_notification_sent(
+                message.channel.id
+            )
+        except psycopg.Error:
+            logger.exception(
+                "Failed to mark application image notification as sent for %s",
+                message.channel.id,
+            )
+            return
+        logger.info(
+            "Notified operations about application image in ticket %s",
+            message.channel.id,
         )
 
     def _is_monitored_ticket_channel(self, channel: discord.TextChannel) -> bool:
