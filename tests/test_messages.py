@@ -9,6 +9,7 @@ from main import (
     build_failure_list_embed,
     build_failure_notification_embed,
     build_mention,
+    build_application_image_notification_embed,
     build_operations_reminder_embed,
     build_ticket_reminder_embed,
     elapsed_days,
@@ -88,6 +89,14 @@ class MentionBuilderTests(unittest.TestCase):
 
 
 class TicketEmbedTests(unittest.TestCase):
+    def test_application_image_embed_contains_ticket_link_and_image(self) -> None:
+        embed = build_application_image_notification_embed(
+            "ticket-10", "20", "10", "https://cdn.discordapp.com/image.png"
+        )
+        self.assertEqual(embed.title, "申請画像を検知しました")
+        self.assertIn("https://discord.com/channels/20/10", embed_text(embed))
+        self.assertEqual(embed.image.url, "https://cdn.discordapp.com/image.png")
+
     def test_ticket_embed_contains_link_and_jst_timestamp(self) -> None:
         embed = build_ticket_reminder_embed(
             "ticket-10", OPENED_AT, 14, "20", "10", cancel_trigger="image"
