@@ -96,7 +96,9 @@ fail if run from another directory.
   and dropped from the threshold denominator), `RGA_TODO_DECIDE_CHANNELS`
   (`category_id:channel_id` pairs, comma separated; the only channels from
   which `/todo decide` may run, one per category; unset = the command is
-  disabled everywhere).
+  disabled everywhere), `RGA_TODO_REMIND_CHANNEL_ID` (single channel for the
+  daily deadline reminder; unset = reminder off), `RGA_TODO_REMIND_TIME`
+  (`HH:MM` JST, default 19:00).
 - Legacy vars still read: `RGA_TICKET_CATEGORY_ID`, `RGA_REMINDER_DAYS`.
 - Invalid config exits with a message. Discord **Message Content Intent** and
   **Server Members Intent** must be
@@ -189,6 +191,16 @@ fail if run from another directory.
   `ticket_todo_decisions` (PK channel+user, last-write-wins) and 判断人数
   counts distinct judges. **The list token is in every API URL — never log
   URLs or raw aiohttp exception messages.**
+- TodoTodo deadline reminder (`TodoReminderScheduler`, 60s loop): when
+  `RGA_TODO_REMIND_CHANNEL_ID` is set, once a day at `RGA_TODO_REMIND_TIME`
+  (JST) it GETs the list (`TodoTodoClient.list_todos`), filters with
+  `collect_deadline_reminders` (unfinished todos whose `deadline` JST date is
+  tomorrow = 期限前日, or past = 期限切れ with day count), and posts one
+  silent digest (`send(..., silent=True)`) with the operations mention
+  (`build_ops_mention`, role preferred) to the channel. Empty result posts
+  nothing. The last-sent date is in-memory only: a restart after the send
+  time can repost the digest once. Fetch failures retry next minute; a
+  Discord send failure is not retried that day.
 - Commands are global-synced in `setup_hook`; invites need the
   `applications.commands` scope.
 - psycopg's async connections refuse Windows' default `ProactorEventLoop`. Call
