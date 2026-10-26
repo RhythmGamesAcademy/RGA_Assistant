@@ -10,7 +10,7 @@ from psycopg_pool import AsyncConnectionPool
 
 logger = logging.getLogger("rga_assistant")
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _CREATE_TICKET_REMINDERS = """
 CREATE TABLE IF NOT EXISTS ticket_reminders (
@@ -50,6 +50,18 @@ CREATE TABLE IF NOT EXISTS application_image_notifications (
         REFERENCES ticket_reminders (channel_id) ON DELETE CASCADE,
     status TEXT NOT NULL CHECK (status IN ('pending', 'sending', 'sent')),
     notified_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ NOT NULL
+)
+"""
+
+_CREATE_APPLICATION_STATUS = """
+CREATE TABLE IF NOT EXISTS ticket_application_status (
+    channel_id TEXT PRIMARY KEY
+        REFERENCES ticket_reminders (channel_id) ON DELETE CASCADE,
+    has_application BOOLEAN,
+    detail TEXT,
+    confidence REAL,
+    method TEXT NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL
 )
 """
@@ -129,6 +141,7 @@ async def _create_schema(connection: Any, now: datetime) -> None:
     await connection.execute(_CREATE_TICKET_REMINDERS)
     await connection.execute(_CREATE_DELIVERIES)
     await connection.execute(_CREATE_APPLICATION_IMAGE_NOTIFICATIONS)
+    await connection.execute(_CREATE_APPLICATION_STATUS)
     await connection.execute(_CREATE_LECTURES)
     await connection.execute(_CREATE_SCHEMA_VERSION)
     await connection.execute(_UPSERT_SCHEMA_VERSION, (SCHEMA_VERSION, now))
@@ -244,6 +257,58 @@ class ReminderDatabase:
                 (now, str(channel_id)),
             )
             return cursor.rowcount > 0
+
+    async def get_application_status(self, channel_id: str) -> dict[str, Any] | None:
+        async with self.pool.connection() as connection:
+            cursor = await connection.execute(
+                """
+                SELECT channel_id, has_application, detail, confidence, method,
+                       updated_at
+                FROM ticket_application_status
+                WHERE channel_id = %s
+                """,
+                (str(channel_id),),
+            )
+            return await cursor.fetchone()
+
+    async def set_application_status(
+        self,
+        channel_id: str,
+        has_application: bool | None,
+        method: str,
+        detail: str | None = None,
+        confidence: float | None = None,
+    ) -> None:
+        """Store the latest application status for one ticket channel.
+
+        Rows are persisted independently of the reminder lifecycle so the
+        status survives restarts and keeps updating after a reminder is sent
+        or cancelled.
+        """
+        now = self._now()
+        async with self.pool.connection() as connection:
+            await connection.execute(
+                """
+                INSERT INTO ticket_application_status
+                    (channel_id, has_application, detail, confidence, method,
+                     updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (channel_id) DO UPDATE
+                SET has_application = EXCLUDED.has_application,
+                    detail = EXCLUDED.detail,
+                    confidence = EXCLUDED.confidence,
+                    method = EXCLUDED.method,
+                    updated_at = EXCLUDED.updated_at
+                """,
+                (
+                    str(channel_id),
+                    has_application,
+                    detail,
+                    confidence,
+                    method,
+                    now,
+                ),
+            )
 
     async def claim_application_image_notification(self, channel_id: int) -> bool:
         """Claim the one allowed application-image notification for a ticket."""
