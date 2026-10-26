@@ -91,11 +91,16 @@ fail if run from another directory.
   (default `/lecture create` post target; per-lecture override allowed).
 - TodoTodo: `RGA_TODO_BASE_URL` + `RGA_TODO_LIST_TOKEN` (both in `.env`; set
   together or the integration stays off — a half-configured state is a config
-  error), `RGA_TODO_ROLE_IDS` (comma-separated; empty = administrators only).
+  error), `RGA_TODO_ROLE_IDS` (comma-separated; empty = administrators only),
+  `RGA_TODO_EXCLUDED_USER_IDS` (comma-separated; may not run `/todo decide`
+  and dropped from the threshold denominator).
 - Legacy vars still read: `RGA_TICKET_CATEGORY_ID`, `RGA_REMINDER_DAYS`.
-- Invalid config exits with a message. Discord **Message Content Intent** must be
-  enabled in the Developer Portal (the cancel trigger reads attachments, which
-  Discord strips without it), otherwise `client.run` raises
+- Invalid config exits with a message. Discord **Message Content Intent** and
+  **Server Members Intent** must be
+  enabled in the Developer Portal (Message Content is needed because the cancel
+  trigger reads attachments, which Discord strips without it; Server Members is
+  needed for the `/todo decide` threshold counting), otherwise `client.run`
+  raises
   `PrivilegedIntentsRequired` (caught and logged in Japanese).
 - Don't read `.env` or `.setting` (real per-deployment files); use
   `.env.example` / `.setting.example` as reference.
@@ -160,13 +165,22 @@ fail if run from another directory.
   `ticket_reminders`, so `tools.purge` removes them together). Client-level
   retries: 5xx and network errors get 3 attempts with 1s/2s backoff; 4xx fails
   immediately. `/todo decide` (choice 承認/却下) requires `RGA_TODO_ROLE_IDS`
-  (or administrator): it PATCHes `status=done` once (guarded by the `decided`
-  flag) and appends an append-only memo (承認/却下の別・判断人数・実行者;
-  a changed decision is recorded as 却下から承認に変更 style). Re-running
-  the same decision replies 「もう判定しました」 and touches nothing.
-  Decisions are stored in `ticket_todo_decisions` (PK channel+user,
-  last-write-wins) and 判断人数 counts distinct judges. **The list token is in
-  every API URL — never log URLs or raw aiohttp exception messages.**
+  (or administrator); excluded users (`RGA_TODO_EXCLUDED_USER_IDS`, `.setting`,
+  comma-separated) may not run it at all and are dropped from the threshold
+  denominator. When decide roles are configured, completion is majority rule:
+  approval and reject are tallied separately (GROUP BY in
+  `TodoDatabase.decision_tallies`) and whichever side reaches
+  `decide_threshold(holders)` = ceil(role holders − excluded / 2, min 1) PATCHes
+  `status=done` once (guarded by the `decided` flag); holders come from
+  `guild.members` (needs `Intents.members` — Server Members Intent) with bots
+  skipped. Without decide roles the first decision settles immediately.
+  Every accepted decision appends an append-only memo (承認/却下の別・
+  判断人数・実行者; a changed decision is recorded as 却下から承認に変更
+  style, threshold mode shows 判断人数 as X/Y). Re-running the same decision
+  replies 「もう判定しました」 and touches nothing. Decisions are stored in
+  `ticket_todo_decisions` (PK channel+user, last-write-wins) and 判断人数
+  counts distinct judges. **The list token is in every API URL — never log
+  URLs or raw aiohttp exception messages.**
 - Commands are global-synced in `setup_hook`; invites need the
   `applications.commands` scope.
 - psycopg's async connections refuse Windows' default `ProactorEventLoop`. Call
