@@ -556,7 +556,7 @@ class RGAAssistant(discord.Client):
             )
             self.todo_scheduler.start()
             self.todo_reminder = TodoReminderScheduler(
-                self, self.todo_client, self.config
+                self, self.todo_client, self.config, self.todo_database
             )
             self.todo_reminder.start()
         self.tree.add_command(

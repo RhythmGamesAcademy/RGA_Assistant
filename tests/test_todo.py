@@ -16,6 +16,7 @@ from todotodo import (
     TodoTodoClient,
     TodoTodoError,
     build_decide_memo,
+    build_new_todo_embed,
     build_todo_description,
     build_todo_remind_embed,
     build_todo_title,
@@ -188,6 +189,33 @@ class DeadlineReminderTests(unittest.TestCase):
 
     def test_remind_embed_is_empty_without_items(self) -> None:
         self.assertEqual(len(build_todo_remind_embed([]).fields), 0)
+
+
+class NewTodoEmbedTests(unittest.TestCase):
+    def test_new_todo_embed_lists_titles_and_links(self) -> None:
+        embed = build_new_todo_embed(
+            [
+                {
+                    "id": "todo-1",
+                    "title": "ticket-10",
+                    "description": "チケット: https://discord.com/channels/20/10",
+                }
+            ]
+        )
+        self.assertEqual(embed.title, "トドTODO 新規TODO")
+        text = "\n".join(
+            [f"{f.name} {f.value}" for f in embed.fields]
+        )
+        self.assertIn("ticket-10", text)
+        self.assertIn("https://discord.com/channels/20/10", text)
+
+    def test_new_todo_embed_caps_fields(self) -> None:
+        todos = [
+            {"id": str(i), "title": f"todo-{i}", "description": ""}
+            for i in range(40)
+        ]
+        embed = build_new_todo_embed(todos)
+        self.assertEqual(len(embed.fields), 25)
 
 
 class TodoTextBuildersTests(unittest.TestCase):
