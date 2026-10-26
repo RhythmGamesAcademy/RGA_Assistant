@@ -17,6 +17,8 @@ from todotodo import (
     build_todo_description,
     build_todo_title,
     build_todo_registration_failure_embed,
+    count_todo_holders,
+    decide_threshold,
     has_todo_permission,
 )
 
@@ -72,6 +74,29 @@ class TodoPermissionTests(unittest.TestCase):
         self.assertFalse(has_todo_permission(False, {10}, (20,)))
 
 
+class TodoThresholdTests(unittest.TestCase):
+    def test_threshold_is_ceil_of_half(self) -> None:
+        self.assertEqual(decide_threshold(0), 1)
+        self.assertEqual(decide_threshold(1), 1)
+        self.assertEqual(decide_threshold(2), 1)
+        self.assertEqual(decide_threshold(3), 2)
+        self.assertEqual(decide_threshold(4), 2)
+        self.assertEqual(decide_threshold(5), 3)
+        self.assertEqual(decide_threshold(6), 3)
+
+    def test_counts_holders_without_excluded_users(self) -> None:
+        members = [(1, {10}), (2, {10, 20}), (3, {30}), (4, set())]
+        self.assertEqual(count_todo_holders(members, (10,)), 2)
+
+    def test_excluded_users_do_not_count(self) -> None:
+        members = [(1, {10}), (2, {10})]
+        self.assertEqual(count_todo_holders(members, (10,), (1,)), 1)
+        self.assertEqual(count_todo_holders(members, (10,), (1, 2)), 0)
+
+    def test_no_required_roles_counts_nobody(self) -> None:
+        self.assertEqual(count_todo_holders([(1, {10})], ()), 0)
+
+
 class TodoTextBuildersTests(unittest.TestCase):
     def test_title_is_truncated_to_the_api_limit(self) -> None:
         title = build_todo_title("ち" * 130)
@@ -125,6 +150,12 @@ class TodoTextBuildersTests(unittest.TestCase):
     def test_memo_is_truncated_to_the_api_limit(self) -> None:
         memo = build_decide_memo(DECISION_APPROVAL, 1, "な" * 2100, 1)
         self.assertLessEqual(len(memo), TODO_MAX_MEMO_LENGTH)
+
+    def test_memo_supports_threshold_style_count(self) -> None:
+        self.assertEqual(
+            build_decide_memo(DECISION_APPROVAL, "2/3", "運営A", 123),
+            "承認｜判断人数: 2/3名｜実行者: 運営A (ID: 123)",
+        )
 
     def test_failure_embed_contains_ticket_link_and_error(self) -> None:
         embed = build_todo_registration_failure_embed("10", "20", 6, "boom")

@@ -11,6 +11,7 @@ REST API (Hono + Neon + Vercel) をサーバー側から操作するクライア
 import asyncio
 import json
 import logging
+from collections.abc import Iterable
 from typing import Any
 
 import aiohttp
@@ -71,6 +72,38 @@ def has_todo_permission(
     return bool(member_role_ids.intersection(required_role_ids))
 
 
+def count_todo_holders(
+    member_role_ids: Iterable[tuple[int, set[int]]],
+    required_role_ids: tuple[int, ...],
+    excluded_user_ids: tuple[int, ...] = (),
+) -> int:
+    """Count distinct users holding at least one required role.
+
+    Excluded users (``RGA_TODO_EXCLUDED_USER_IDS``) do not count toward the
+    denominator of the decision threshold.
+    """
+    excluded = set(excluded_user_ids)
+    required = set(required_role_ids)
+    count = 0
+    for user_id, role_ids in member_role_ids:
+        if user_id in excluded:
+            continue
+        if role_ids.intersection(required):
+            count += 1
+    return count
+
+
+def decide_threshold(holders: int) -> int:
+    """Return the majority threshold (ceil of holders / 2).
+
+    With no known holders the threshold stays at 1 so a single decision can
+    still settle the TODO (safe side).
+    """
+    if holders <= 0:
+        return 1
+    return (holders + 1) // 2
+
+
 def build_todo_title(channel_name: str) -> str:
     """Build the TodoTodo title from the ticket channel name."""
     return truncate(channel_name, TODO_MAX_TITLE_LENGTH)
@@ -87,7 +120,7 @@ def _decision_label(decision: str) -> str:
 
 def build_decide_memo(
     decision: str,
-    judge_count: int,
+    judge_count: int | str,
     executor_name: str,
     executor_id: int,
     previous_decision: str | None = None,
@@ -96,6 +129,7 @@ def build_decide_memo(
 
     When the executor changes their earlier decision, the memo records the
     change (e.g. ``却下から承認に変更``) instead of a plain decision.
+    ``judge_count`` may be a ``2/3`` style string in threshold mode.
     """
     label = _decision_label(decision)
     if previous_decision is not None and previous_decision != decision:
@@ -276,6 +310,14 @@ class TodoCommands(app_commands.Group):
                 ephemeral=True,
             )
             return False
+        if member.id in self.config.todo_excluded_user_ids:
+            await interaction.response.send_message(
+                embed=error_embed(
+                    "あなたはTODO判断の対象から除外されています。運営に確認してください。"
+                ),
+                ephemeral=True,
+            )
+            return False
         if has_todo_permission(
             member.guild_permissions.administrator,
             {role.id for role in member.roles},
@@ -365,18 +407,41 @@ class TodoCommands(app_commands.Group):
             )
             return
 
+        # Threshold mode is active only when decide roles are configured;
+        # without them the first decision settles the TODO as before.
+        threshold: int | None = None
+        guild = interaction.guild
+        if self.config.todo_role_ids and guild is not None:
+            holders = count_todo_holders(
+                ((m.id, {r.id for r in m.roles}) for m in guild.members if not m.bot),
+                self.config.todo_role_ids,
+                self.config.todo_excluded_user_ids,
+            )
+            threshold = decide_threshold(holders)
+
         # The API calls below include retries and can take several seconds.
         await interaction.response.defer(thinking=True)
         try:
             judge_count = await self.database.record_decision(
                 channel_id, str(interaction.user.id), decision.value
             )
-            if not row.get("decided"):
-                await self.client.complete_todo(row["todo_id"])
-                await self.database.mark_todo_decided(channel_id)
+            tallies = await self.database.decision_tallies(channel_id)
+            already_decided = bool(row.get("decided"))
+            settle = False
+            if not already_decided:
+                if threshold is None:
+                    settle = True
+                else:
+                    settle = max(
+                        tallies.get(DECISION_APPROVAL, 0),
+                        tallies.get(DECISION_REJECT, 0),
+                    ) >= threshold
+                if settle:
+                    await self.client.complete_todo(row["todo_id"])
+                    await self.database.mark_todo_decided(channel_id)
             memo = build_decide_memo(
                 decision.value,
-                judge_count,
+                f"{judge_count}/{threshold}" if threshold is not None else judge_count,
                 interaction.user.display_name,
                 interaction.user.id,
                 previous_decision=previous,
@@ -399,18 +464,27 @@ class TodoCommands(app_commands.Group):
             )
             return
 
+        if settle:
+            tail = "トドTODOのTODOを決着させ、メモを追記しました。"
+        elif already_decided:
+            tail = "TODOはすでに決着済みのため、メモのみ追記しました。"
+        else:
+            tail = "判断人数がしきい値に達していないため、TODOはまだ決着していません。"
         if previous is None:
             title = f"{label}を記録しました"
-            description = "トドTODOのTODOを決着させ、メモを追記しました。"
+            description = tail
         else:
             title = "判断を変更しました"
-            description = (
-                f"{_decision_label(previous)}から{label}へ変更し、"
-                "メモを追記しました。"
-            )
-        embed = success_embed(title, f"{description}\n判断人数: {judge_count}名")
+            description = f"{_decision_label(previous)}から{label}へ変更し、{tail}"
+        if threshold is not None:
+            progress = f"判断人数: {judge_count}/{threshold}名"
+        else:
+            progress = f"判断人数: {judge_count}名"
+        embed = success_embed(title, f"{description}\n{progress}")
         embed.add_field(
-            name="TODOステータス", value="done", inline=True
+            name="TODOステータス",
+            value="done" if (settle or already_decided) else "todo",
+            inline=True,
         )
         await interaction.followup.send(embed=embed, ephemeral=True)
 

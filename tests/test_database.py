@@ -368,6 +368,11 @@ class TodoDatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await todo.record_decision("10", 2, "approval"), 2)
         self.assertEqual(await todo.get_decision("10", 2), ("approval", 2))
 
+        self.assertEqual(
+            await todo.decision_tallies("10"),
+            {"approval": 1, "reject": 1},
+        )
+
         await todo.mark_todo_decided("10")
         row = await todo.get_todo("10")
         self.assertIs(row["decided"], True)
