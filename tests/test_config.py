@@ -1,7 +1,7 @@
 import os
 import tempfile
 import unittest
-from datetime import timedelta
+from datetime import time, timedelta
 
 from config import (
     load_env_files,
@@ -12,6 +12,7 @@ from config import (
     parse_optional_id,
     parse_positive_float,
     parse_positive_int,
+    parse_remind_time,
     parse_reminder_after,
     parse_reminder_targets,
     parse_trigger_texts,
@@ -175,6 +176,23 @@ class ChannelMappingConfigTests(unittest.TestCase):
             parse_channel_mappings("111:999, 222:999", "RGA_X"),
             ((111, 999), (222, 999)),
         )
+
+
+class RemindTimeConfigTests(unittest.TestCase):
+    def test_parses_hhmm(self) -> None:
+        self.assertEqual(
+            parse_remind_time(" 19:00 ", "RGA_TODO_REMIND_TIME"),
+            time(19, 0),
+        )
+        self.assertEqual(
+            parse_remind_time("09:30", "RGA_TODO_REMIND_TIME"),
+            time(9, 30),
+        )
+
+    def test_rejects_invalid_times(self) -> None:
+        for value in ("", "abc", "19", "19:00:30", "24:00", "19:5"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                parse_remind_time(value, "RGA_TODO_REMIND_TIME")
 
 
 SPLIT_ENV_VARS = ("DISCORD_TOKEN", "RGA_REMINDER_VALUE")
