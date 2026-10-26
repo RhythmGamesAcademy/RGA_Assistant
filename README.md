@@ -20,12 +20,14 @@ Ticket Tool連携のチケットリマインダーと講義スケジュール通
 6. Botを招待する際は `bot` と `applications.commands` の両方のスコープを指定します
    （スラッシュコマンドの登録に必要です）。
 7. [Discord Developer Portal](https://discord.com/developers/applications)で対象アプリを開き、
-   **Bot** > **Privileged Gateway Intents** > **Message Content Intent**を有効にします。
+   **Bot** > **Privileged Gateway Intents** > **Message Content Intent**と
+   **Server Members Intent**を有効にします。
 8. リポジトリ直下で `python main.py` を実行します。
 
 テーブルは起動時に自動作成されます。事前に手動でスキーマを流す必要はありません。
 
-Message Content Intentを有効にせずに起動すると、Discordが接続を拒否します。
+Message Content Intent・Server Members Intentを有効にせずに起動すると、
+Discordが接続を拒否します。
 有効化後も同じエラーが出る場合は、Botトークンが対象アプリのものか確認してから
 Botを再起動してください。
 
@@ -77,7 +79,8 @@ Botを再起動してください。
 | `RGA_JEV_EVALUATION_COOLDOWN_SECONDS` | | `600` | 同じチケットのJev再評価までの最短間隔（秒、クレジット節約用）。 |
 | `RGA_TODO_BASE_URL` | △ | 空 | トドTODOのAPIのBase URL。`RGA_TODO_LIST_TOKEN` と**両方**設定すると連携が有効になります。秘密情報を含むため `.env` に記載します。 |
 | `RGA_TODO_LIST_TOKEN` | △ | 空 | トドTODOのリストトークン（認可に使用）。ソース・ログ・チャットに出力しないこと。 |
-| `RGA_TODO_ROLE_IDS` | | 空 | `/todo decide` を実行できるロールID（カンマ区切り）。空の場合は管理者のみ。 |
+| `RGA_TODO_ROLE_IDS` | | 空 | `/todo decide` を実行できるロールID（カンマ区切り）。空の場合は管理者のみ。設定している場合はロール保持者の過半数（繰り上げ）の同意でTODOが決着します。 |
+| `RGA_TODO_EXCLUDED_USER_IDS` | | 空 | `/todo decide` を実行できないユーザーID（カンマ区切り）。しきい値の分母からも除外されます。 |
 
 旧設定 `RGA_TICKET_CATEGORY_ID`（単一カテゴリ）と `RGA_REMINDER_DAYS` も
 引き続き利用できます。
@@ -259,13 +262,21 @@ TODO操作の履歴にはBotが操作者として記録されます。
 - **API障害時の再試行**: APIが5xxを返した場合や通信エラーの場合は、
   指数バックオフで最大3回再試行します。
 - **決着コマンド**: チケットチャンネル内で `/todo decide` を実行すると、
-  TODOを `status=done` に更新し、承認・却下の別、判断人数（判断した人数の合計）、
-  実行者をメモに追記します。判断人数は判断した**人数**の合計です
-  （同じ人が何回実行しても判断人数は変わりません）。
+  承認・却下の別、判断人数（判断した人数の合計）、実行者をメモに追記します。
+  判断人数は判断した**人数**の合計です（同じ人が何回実行しても判断人数は変わりません）。
+  - `RGA_TODO_ROLE_IDS` を設定している場合、ロール保持者数（`RGA_TODO_EXCLUDED_USER_IDS`
+    を除く）の過半数（繰り上げ）に達した判断でTODOを `status=done` にします。
+    承認と却下は別々に集計し、どちらか一方がしきい値に達した時点で決着します
+    （賛反が割れている間は決着しません）。しきい値未達の間はTODOは `todo` のままです。
+  - `RGA_TODO_ROLE_IDS` が空（管理者のみ運用）の場合は、最初の判断で即座に
+    TODOを `status=done` にします。
+  - `RGA_TODO_EXCLUDED_USER_IDS` に指定したユーザーは `/todo decide` を実行できず、
+    しきい値の分母にも数えられません。
   - すでに同じ判断を記録した人が再実行すると「もう判定しました」と表示され、
     TODOの更新・メモ追記は行われません。
   - 前回と異なる判断（承認↔却下）を選ぶと「判断を変更しました」と表示され、
     新しい判断として上書きされ、変更内容がメモに追記されます。
+    決着済みのTODOへの判断はメモ追記のみ行われます。
 - `doing`（判断中）はBotが操作しません。モデレータがトドTODO側で手動運用します。
 
 トドTODOのAPIトークンは秘密情報のため `.env` で管理し、ソース・ログ・チャットには
@@ -422,7 +433,7 @@ python -m tools.migrate_sqlite path/to/legacy.sqlite3   # ファイルを指定�
 
 | 症状 | 対処 |
 |---|---|
-| 起動時に `Message Content Intent を有効にしてください。` | Developer Portalで Message Content Intent を有効化し、再起動します。 |
+| 起動時に `Message Content Intent と Server Members Intent を有効にしてください。` | Developer Portalで両方のIntentを有効化し、再起動します。 |
 | `RGA_TICKET_CATEGORY_IDS ... must contain valid values.` | カテゴリIDが正の整数のカンマ区切りか確認します。 |
 | `RGA_OPERATIONS_CHANNEL_ID is required ...` | `RGA_REMINDER_TARGET` が `operations`/`both` のときは運営チャンネルIDを設定します。 |
 | `Set either RGA_OPERATIONS_MENTION_ROLE_ID or ...` | メンションはロールかユーザーのどちらか一方だけを設定します。 |
