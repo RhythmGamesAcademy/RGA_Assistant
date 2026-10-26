@@ -10,7 +10,7 @@ from psycopg_pool import AsyncConnectionPool
 
 logger = logging.getLogger("rga_assistant")
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _CREATE_TICKET_REMINDERS = """
 CREATE TABLE IF NOT EXISTS ticket_reminders (
@@ -126,6 +126,13 @@ CREATE TABLE IF NOT EXISTS ticket_todo_decisions (
 )
 """
 
+_CREATE_TODO_SEEN = """
+CREATE TABLE IF NOT EXISTS todo_seen_todos (
+    todo_id TEXT PRIMARY KEY,
+    seen_at TIMESTAMPTZ NOT NULL
+)
+"""
+
 _UPSERT_SCHEMA_VERSION = """
 INSERT INTO schema_version (id, version, updated_at)
 VALUES (TRUE, %s, %s)
@@ -170,6 +177,7 @@ async def _create_schema(connection: Any, now: datetime) -> None:
     await connection.execute(_CREATE_LECTURES)
     await connection.execute(_CREATE_TICKET_TODOS)
     await connection.execute(_CREATE_TICKET_TODO_DECISIONS)
+    await connection.execute(_CREATE_TODO_SEEN)
     await connection.execute(_CREATE_SCHEMA_VERSION)
     await connection.execute(_UPSERT_SCHEMA_VERSION, (SCHEMA_VERSION, now))
 
@@ -1173,6 +1181,37 @@ class TodoDatabase:
             )
             rows = await cursor.fetchall()
             return {row["decision"]: int(row["count"]) for row in rows}
+
+    async def seen_todo_count(self) -> int:
+        """Count todos already marked as seen (new-todo bootstrap check)."""
+        async with self.pool.connection() as connection:
+            cursor = await connection.execute(
+                "SELECT count(*) AS count FROM todo_seen_todos"
+            )
+            row = await cursor.fetchone()
+            return int(row["count"])
+
+    async def claim_new_todos(self, todo_ids: list[str]) -> list[str]:
+        """Mark the given todo ids as seen and return the previously unseen.
+
+        Used to detect TodoTodo-side created items: the first call on an
+        empty table returns every id, so callers must bootstrap (see
+        ``seen_todo_count``) before notifying.
+        """
+        if not todo_ids:
+            return []
+        async with self.pool.connection() as connection:
+            cursor = await connection.execute(
+                """
+                INSERT INTO todo_seen_todos (todo_id, seen_at)
+                SELECT id, %s FROM unnest(%s::text[]) AS t(id)
+                ON CONFLICT (todo_id) DO NOTHING
+                RETURNING todo_id
+                """,
+                (self._now(), todo_ids),
+            )
+            rows = await cursor.fetchall()
+            return [row["todo_id"] for row in rows]
 
     @staticmethod
     def _now() -> datetime:

@@ -1,5 +1,6 @@
 import json
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
 import aiohttp
@@ -9,14 +10,18 @@ from todotodo import (
     ASSISTANT_NAME,
     DECISION_APPROVAL,
     DECISION_REJECT,
+    JST,
     TODO_MAX_MEMO_LENGTH,
     TODO_MAX_TITLE_LENGTH,
     TodoTodoClient,
     TodoTodoError,
     build_decide_memo,
+    build_new_todo_embed,
     build_todo_description,
+    build_todo_remind_embed,
     build_todo_title,
     build_todo_registration_failure_embed,
+    collect_deadline_reminders,
     count_todo_holders,
     decide_threshold,
     find_decide_channel,
@@ -104,6 +109,113 @@ class TodoThresholdTests(unittest.TestCase):
         self.assertIsNone(find_decide_channel(30, ((10, 777),)))
         self.assertIsNone(find_decide_channel(None, ((10, 777),)))
         self.assertIsNone(find_decide_channel(10, ()))
+
+
+class DeadlineReminderTests(unittest.TestCase):
+    # 2026-10-28 19:00 JST (fixed reference point).
+    NOW = datetime(2026, 10, 28, 19, 0, tzinfo=JST)
+
+    def _payload(self, **todo_overrides) -> dict:
+        todo = {
+            "id": "todo-1",
+            "title": "ticket-10",
+            "description": "チケット: https://discord.com/channels/20/10",
+            "deadline": "2026-10-29T09:00:00.000Z",  # 2026-10-29 18:00 JST
+            "status": "todo",
+        }
+        todo.update(todo_overrides)
+        return {"todos": [todo]}
+
+    def test_tomorrow_deadline_is_picked_as_reminder(self) -> None:
+        items = collect_deadline_reminders(self._payload(), self.NOW)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["reason"], "期限前日")
+        self.assertEqual(items[0]["id"], "todo-1")
+
+    def test_overdue_deadline_is_picked_with_days(self) -> None:
+        items = collect_deadline_reminders(
+            self._payload(deadline="2026-10-27T09:00:00.000Z"), self.NOW
+        )
+        self.assertEqual(items[0]["reason"], "期限切れ（1日超過）")
+
+    def test_today_and_future_deadlines_are_skipped(self) -> None:
+        self.assertEqual(
+            collect_deadline_reminders(
+                self._payload(deadline="2026-10-28T09:00:00.000Z"), self.NOW
+            ),
+            [],
+        )
+        self.assertEqual(
+            collect_deadline_reminders(
+                self._payload(deadline="2026-11-05T09:00:00.000Z"), self.NOW
+            ),
+            [],
+        )
+
+    def test_done_and_no_deadline_and_malformed_are_skipped(self) -> None:
+        self.assertEqual(
+            collect_deadline_reminders(
+                self._payload(status="done"), self.NOW
+            ),
+            [],
+        )
+        self.assertEqual(
+            collect_deadline_reminders(self._payload(deadline=None), self.NOW),
+            [],
+        )
+        self.assertEqual(
+            collect_deadline_reminders(
+                self._payload(deadline="not-a-date"), self.NOW
+            ),
+            [],
+        )
+
+    def test_doing_status_is_still_reminded(self) -> None:
+        items = collect_deadline_reminders(
+            self._payload(status="doing"), self.NOW
+        )
+        self.assertEqual(len(items), 1)
+
+    def test_remind_embed_lists_items_with_deadline_and_link(self) -> None:
+        items = collect_deadline_reminders(self._payload(), self.NOW)
+        embed = build_todo_remind_embed(items)
+        text = "\n".join(
+            [embed.title or "", embed.description or ""]
+            + [f"{f.name} {f.value}" for f in embed.fields]
+        )
+        self.assertIn("期限前日", text)
+        self.assertIn("2026/10/29 18:00", text)
+        self.assertIn("https://discord.com/channels/20/10", text)
+
+    def test_remind_embed_is_empty_without_items(self) -> None:
+        self.assertEqual(len(build_todo_remind_embed([]).fields), 0)
+
+
+class NewTodoEmbedTests(unittest.TestCase):
+    def test_new_todo_embed_lists_titles_and_links(self) -> None:
+        embed = build_new_todo_embed(
+            [
+                {
+                    "id": "todo-1",
+                    "title": "ticket-10",
+                    "description": "チケット: https://discord.com/channels/20/10",
+                }
+            ]
+        )
+        self.assertEqual(embed.title, "トドTODO 新規TODO")
+        text = "\n".join(
+            [f"{f.name} {f.value}" for f in embed.fields]
+        )
+        self.assertIn("ticket-10", text)
+        self.assertIn("https://discord.com/channels/20/10", text)
+
+    def test_new_todo_embed_caps_fields(self) -> None:
+        todos = [
+            {"id": str(i), "title": f"todo-{i}", "description": ""}
+            for i in range(40)
+        ]
+        embed = build_new_todo_embed(todos)
+        self.assertEqual(len(embed.fields), 25)
 
 
 class TodoTextBuildersTests(unittest.TestCase):

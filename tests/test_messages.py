@@ -1,5 +1,5 @@
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 
 import discord
 
@@ -51,6 +51,8 @@ def make_config(**overrides) -> Config:
         todo_role_ids=(),
         todo_excluded_user_ids=(),
         todo_decide_channels=(),
+        todo_remind_channel_id=None,
+        todo_remind_time=time(19, 0),
     )
     settings.update(overrides)
     return Config(**settings)

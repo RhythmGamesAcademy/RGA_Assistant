@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 from collections.abc import Iterable
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import aiohttp
@@ -50,6 +51,12 @@ TODO_RETRY_MAX_SECONDS = 8.0
 # TODO自動登録の再試行ループ間隔 (秒)。
 TODO_TICK_SECONDS = 60
 TODO_RETRY_SECONDS = 60.0
+
+# 期限リマインドのチェックループ間隔 (秒)。
+TODO_REMIND_TICK_SECONDS = 60
+
+# Bot 内の JST 固定 (main.py と同じ扱い)。
+JST = timezone(timedelta(hours=9), name="JST")
 
 DECISION_APPROVAL = "approval"
 DECISION_REJECT = "reject"
@@ -112,6 +119,104 @@ def find_decide_channel(
     if ticket_category_id is None:
         return None
     return dict(decide_channels).get(ticket_category_id)
+
+
+def collect_deadline_reminders(
+    payload: Any,
+    now: datetime,
+) -> list[dict[str, Any]]:
+    """Pick the unfinished todos needing a deadline reminder.
+
+    A todo qualifies when it is not ``done`` and has a ``deadline`` whose
+    date (JST) is either tomorrow (reminder one day ahead) or already past
+    (overdue). Todos without a deadline and malformed dates are skipped.
+    ``now`` must be timezone-aware; comparisons use the JST date.
+    """
+    todos = (payload or {}).get("todos") or []
+    today = now.astimezone(JST).date()
+    tomorrow = today + timedelta(days=1)
+    items: list[dict[str, Any]] = []
+    for todo in todos:
+        if not isinstance(todo, dict) or todo.get("status") == "done":
+            continue
+        raw_deadline = todo.get("deadline")
+        if not raw_deadline:
+            continue
+        try:
+            deadline = datetime.fromisoformat(
+                str(raw_deadline).replace("Z", "+00:00")
+            )
+        except ValueError:
+            continue
+        deadline_jst = deadline.astimezone(JST)
+        due_date = deadline_jst.date()
+        if due_date == tomorrow:
+            reason = "期限前日"
+        elif due_date < today:
+            reason = f"期限切れ（{(today - due_date).days}日超過）"
+        else:
+            continue
+        items.append(
+            {
+                "id": todo.get("id"),
+                "title": todo.get("title") or "",
+                "description": todo.get("description") or "",
+                "deadline": deadline_jst,
+                "status": todo.get("status") or "",
+                "reason": reason,
+            }
+        )
+    return items
+
+
+def build_todo_remind_embed(items: list[dict[str, Any]]) -> discord.Embed:
+    """Build the daily deadline reminder embed from collected items."""
+    embed = discord.Embed(
+        title="トドTODO 期限リマインド",
+        description=(
+            "期限の1日前または期限切れの未決着TODOがあります。"
+            "決着用チャンネルで `/todo decide` を実行してください。"
+        ),
+        color=COLOR_INFO,
+    )
+    for item in items:
+        link = truncate(item.get("description") or "", MAX_FIELD_VALUE)
+        value = (
+            f"期限: {item['deadline'].strftime('%Y/%m/%d %H:%M')} (JST)\n"
+            f"状態: {item['reason']}\n{link}"
+        )
+        embed.add_field(
+            name=truncate(item.get("title") or "(無題)", 100),
+            value=truncate(value, MAX_FIELD_VALUE),
+            inline=False,
+        )
+    return embed
+
+
+def build_new_todo_embed(todos: list[dict[str, Any]]) -> discord.Embed:
+    """Build the embed announcing newly created TodoTodo items."""
+    embed = discord.Embed(
+        title="トドTODO 新規TODO",
+        description="トドTODO側で新しいTODOが登録されました。",
+        color=COLOR_INFO,
+    )
+    for todo in todos[:25]:
+        link = truncate(todo.get("description") or "", MAX_FIELD_VALUE) or "-"
+        embed.add_field(
+            name=truncate(todo.get("title") or "(無題)", 100),
+            value=link,
+            inline=False,
+        )
+    return embed
+
+
+def build_ops_mention(config: Config) -> str | None:
+    """Return the operations mention string (role preferred), if configured."""
+    if config.operations_mention_role_id is not None:
+        return f"<@&{config.operations_mention_role_id}>"
+    if config.operations_mention_user_id is not None:
+        return f"<@{config.operations_mention_user_id}>"
+    return None
 
 
 def build_todo_title(channel_name: str) -> str:
@@ -232,6 +337,10 @@ class TodoTodoClient:
         if self.assistant_user_id is not None:
             payload["userId"] = self.assistant_user_id
         await self._request("POST", f"/todos/{todo_id}/memos", payload)
+
+    async def list_todos(self) -> Any:
+        """Fetch the list payload (todos included) from the API."""
+        return await self._request("GET", "")
 
     async def _request(
         self,
@@ -677,3 +786,155 @@ class TodoRegistrationScheduler:
             )
         except (discord.HTTPException, psycopg.Error):
             logger.exception("Failed to notify operations about TodoTodo failure")
+
+
+class TodoReminderScheduler:
+    """TodoTodo watch loop: deadline digest + new-item announcements.
+
+    Every 60 seconds (while ``RGA_TODO_REMIND_CHANNEL_ID`` is set) it fetches
+    the list and (1) once a day at the configured JST time posts a silent
+    digest of unfinished todos due tomorrow or overdue, and (2) announces
+    silently any todos created on the TodoTodo side (bot-created ones
+    excluded). The sent date and the seen todo ids are tracked in memory /
+    PostgreSQL respectively; a restart after the digest time can repost it
+    once, and the first run after deployment only seeds existing ids.
+    """
+
+    def __init__(
+        self,
+        client: discord.Client,
+        todotodo: TodoTodoClient,
+        config: Config,
+        database: TodoDatabase,
+    ) -> None:
+        self.client = client
+        self.todotodo = todotodo
+        self.config = config
+        self.database = database
+        self._last_sent_date: str | None = None
+
+    def start(self) -> None:
+        self.remind_loop.start()
+
+    @tasks.loop(seconds=TODO_REMIND_TICK_SECONDS)
+    async def remind_loop(self) -> None:
+        if self.config.todo_remind_channel_id is None:
+            return
+        now = datetime.now(JST)
+        try:
+            payload = await self.todotodo.list_todos()
+        except TodoTodoError as exc:
+            logger.warning(
+                "Could not fetch the TodoTodo list for the reminder; "
+                "will retry: %s",
+                exc,
+            )
+            return
+        await self._maybe_send_deadline_digest(payload, now)
+        await self._notify_new_todos(payload)
+
+    async def _maybe_send_deadline_digest(
+        self, payload: Any, now: datetime
+    ) -> None:
+        """Send the daily deadline digest at most once per day."""
+        target = now.replace(
+            hour=self.config.todo_remind_time.hour,
+            minute=self.config.todo_remind_time.minute,
+            second=0,
+            microsecond=0,
+        )
+        if now < target or self._last_sent_date == now.date().isoformat():
+            return
+        items = collect_deadline_reminders(payload, now)
+        self._last_sent_date = now.date().isoformat()
+        if not items:
+            return
+        embed = build_todo_remind_embed(items)
+        try:
+            await self._send_remind(embed)
+            logger.info(
+                "Sent TodoTodo deadline reminder with %s items", len(items)
+            )
+        except discord.HTTPException:
+            logger.exception("Failed to send the TodoTodo deadline reminder")
+
+    async def _notify_new_todos(self, payload: Any) -> None:
+        """Announce todos created on the TodoTodo side since the last check.
+
+        Bot-created todos (the assistant member is their assignee/user) are
+        excluded; the first run with an empty seen-table only seeds the
+        existing ids without notifying.
+        """
+        todos = [
+            todo
+            for todo in (payload or {}).get("todos") or []
+            if isinstance(todo, dict) and todo.get("id")
+        ]
+        if not todos:
+            return
+        if self.todotodo.assistant_user_id is None:
+            try:
+                await self.todotodo.ensure_assistant_member()
+            except TodoTodoError as exc:
+                logger.warning(
+                    "Could not resolve the assistant member for the "
+                    "new-todo check: %s",
+                    exc,
+                )
+                return
+        assistant = self.todotodo.assistant_user_id
+        candidates = [
+            todo
+            for todo in todos
+            if todo.get("userId") != assistant
+            and todo.get("assigneeId") != assistant
+        ]
+        all_ids = [todo["id"] for todo in todos]
+        try:
+            if await self.database.seen_todo_count() == 0:
+                # Bootstrap: seed every current id silently.
+                await self.database.claim_new_todos(all_ids)
+                return
+            new_ids = set(await self.database.claim_new_todos(
+                [todo["id"] for todo in candidates]
+            ))
+        except psycopg.Error:
+            logger.exception("Failed to track seen TodoTodo items")
+            return
+        fresh = [todo for todo in candidates if todo["id"] in new_ids]
+        if not fresh:
+            return
+        embed = build_new_todo_embed(fresh)
+        try:
+            await self._send_remind(embed)
+            logger.info("Announced %s new TodoTodo items", len(fresh))
+        except discord.HTTPException:
+            logger.exception("Failed to announce new TodoTodo items")
+
+    async def _send_remind(self, embed: discord.Embed) -> None:
+        """Post a silent (@silent equivalent) reminder to the configured channel."""
+        mention = build_ops_mention(self.config)
+        allowed_mentions = (
+            discord.AllowedMentions.none()
+            if mention is None
+            else discord.AllowedMentions.all()
+        )
+        channel = await self.client.fetch_channel(
+            self.config.todo_remind_channel_id
+        )
+        if not isinstance(channel, discord.TextChannel):
+            logger.error(
+                "TodoTodo reminder channel %s is not a text channel",
+                self.config.todo_remind_channel_id,
+            )
+            return
+        await channel.send(
+            content=mention,
+            embed=embed,
+            silent=True,
+            allowed_mentions=allowed_mentions,
+        )
+
+    @remind_loop.before_loop
+    async def before_remind_loop(self) -> None:
+        await self.client.wait_until_ready()
