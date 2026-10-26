@@ -1173,3 +1173,7 @@ class TodoDatabase:
             )
             rows = await cursor.fetchall()
             return {row["decision"]: int(row["count"]) for row in rows}
+
+    @staticmethod
+    def _now() -> datetime:
+        return datetime.now(timezone.utc)
