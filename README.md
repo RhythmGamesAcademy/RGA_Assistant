@@ -37,7 +37,8 @@ Botを再起動してください。
 `.setting.example` です。`RGA_REMINDER_CANCEL_TRIGGER=image` のような既定値と同値の
 行は、読みやすさのためテンプレートに入れていません。
 
-- `.env`: `DISCORD_TOKEN` / `RGA_DATABASE_URL` / `RGA_TEST_DATABASE_URL`
+- `.env`: `DISCORD_TOKEN` / `RGA_DATABASE_URL` / `RGA_TEST_DATABASE_URL` /
+  `RGA_JEV_API_KEY` / `RGA_TODO_BASE_URL` / `RGA_TODO_LIST_TOKEN`
 - `.setting`: 上記以外のすべて
 
 どちらかのファイルが無くても起動できます（無い設定は省略値のみで動作し、必須項目
@@ -56,6 +57,7 @@ Botを再起動してください。
 | `RGA_REMINDER_VALUE` | | `14` | リマインダーまでの時間。 |
 | `RGA_REMINDER_UNIT` | | `days` | `seconds`/`minutes`/`hours`/`days`/`weeks`。 |
 | `RGA_REMINDER_TARGET` | | `ticket` | 送信先。`ticket`/`operations`/`both`。 |
+| `RGA_APPLICATION_STATUS_MODE` | | `simple` | 申請状況の判定方式。`simple`（Bot自前の判定・外部API不要）/ `jev`（Jev APIで多段階判定）から選択します（「申請状況の判定」節参照）。 |
 | `RGA_OPERATIONS_CHANNEL_ID` | △ | 空 | 運営用チャンネルID。`operations`/`both`では必須。申請画像の即時通知・失敗通知先も兼ねます。 |
 | `RGA_OPERATIONS_MENTION_ROLE_ID` | | 空 | 運営向け通知でメンションするロールID。 |
 | `RGA_OPERATIONS_MENTION_USER_ID` | | 空 | 運営向け通知でメンションするユーザーID。`RGA_OPERATIONS_MENTION_ROLE_ID` とは併用できません。 |
@@ -67,6 +69,14 @@ Botを再起動してください。
 | `RGA_LECTURE_ROLE_IDS` | | 空 | 講義コマンドを実行できるロールID（カンマ区切り）。空の場合は管理者のみ。 |
 | `RGA_LECTURE_REMINDER_MINUTES` | | `15` | 講義開始の何分前にリマインダーを送るか。 |
 | `RGA_LECTURE_ANNOUNCE_CHANNEL_ID` | | 空 | 講義案内の既定投稿先チャンネル。`/lecture create` で個別指定も可能。 |
+| `RGA_JEV_API_KEY` | △ | 空 | Jev APIキー。`RGA_APPLICATION_STATUS_MODE=jev` のとき必須。シークレットなので `.env` に記載します。 |
+| `RGA_JEV_MODEL` | | `typesafe/jev-1.14` | Jev APIに渡すモデルID。 |
+| `RGA_JEV_CONFIDENCE_THRESHOLD` | | `0.7` | この確信度未満のJev判定は「要人確認」として表示します。 |
+| `RGA_JEV_HISTORY_LIMIT` | | `50` | Jevに渡すチャンネル履歴の最大件数。 |
+| `RGA_JEV_EVALUATION_COOLDOWN_SECONDS` | | `600` | 同じチケットのJev再評価までの最短間隔（秒、クレジット節約用）。 |
+| `RGA_TODO_BASE_URL` | △ | 空 | トドTODOのAPIのBase URL。`RGA_TODO_LIST_TOKEN` と**両方**設定すると連携が有効になります。秘密情報を含むため `.env` に記載します。 |
+| `RGA_TODO_LIST_TOKEN` | △ | 空 | トドTODOのリストトークン（認可に使用）。ソース・ログ・チャットに出力しないこと。 |
+| `RGA_TODO_ROLE_IDS` | | 空 | `/todo decide` を実行できるロールID（カンマ区切り）。空の場合は管理者のみ。 |
 
 旧設定 `RGA_TICKET_CATEGORY_ID`（単一カテゴリ）と `RGA_REMINDER_DAYS` も
 引き続き利用できます。
@@ -147,6 +157,31 @@ Botを再起動してください。
 失敗は、バックオフせず即座に `error` 状態にします。チャンネルが取得できず
 `NotFound` の場合は、チケットが閉じたとみなしてキャンセルします。
 
+### 申請状況の判定
+
+運営向けリマインダーの field には「申請の確認」を表示します。判定方式は
+`RGA_APPLICATION_STATUS_MODE` で選択できます（併用はしません）。
+
+- `simple`（既定）: 外部APIを使わず、Bot自前の添付画像検知
+  （`RGA_REMINDER_CANCEL_TRIGGER=image` と同一基準、MIME `image/*`）で
+  true / false を記録します。確実・無料です。
+- `jev`: チャンネル履歴を JSON 化して Jev（TypeSafe AI の判断モデル）に渡し、
+  「未申請 / 申請中 / 審査中 / 判断不能」の多段階状況と確率・確信度を取得します。
+  `RGA_JEV_EVALUATION_COOLDOWN_SECONDS` 秒経過するまでは同じチケットを
+  再評価しません。API key 未設定・通信失敗・Jev障害時は簡易判定に
+  フォールバックします。確信度が `RGA_JEV_CONFIDENCE_THRESHOLD` 未満の結果は
+  「要人確認」として表示します。
+
+判定結果は DB（`ticket_application_status`）に記録され、リマインダーの
+キャンセル済み・送信済みチケットも継続して判定し、再起動後も保持されます。
+
+留意事項: Jevは画像を state に渡せないため、添付は MIME タイプ等のメタデータ
+のみ送信します。申請者個人情報を含む会話を外部APIへ送るため、運用方針を確認
+してから `jev` を有効化してください（既定は `simple`）。日本語精度は未検証のため
+Jev Playground（https://thejevai.com/playground）で実チケット文面を検証してから
+使用してください。Jevは早期アクセス（クレジット制・入力のみ課金）のため、
+可用性と費用も確認してください。
+
 ## 送信失敗からの復旧
 
 `error` 状態の送信は、Discordから次のコマンドで確認・再試行できます
@@ -183,6 +218,7 @@ python -m tools.retry --list     # 失敗状態を一覧表示
 | `/rga help` | Botの機能とコマンドの説明を表示します。 | 全利用者 |
 | `/rga failures` | 送信に失敗したチケットリマインダーを一覧表示します。 | `RGA_LECTURE_ROLE_IDS` のロール保持者または管理者 |
 | `/rga retry` | 失敗した送信を再試行対象に戻します。 | 同上 |
+| `/todo decide` | チケットのTODOを決着させます（承認／却下を選択）。 | `RGA_TODO_ROLE_IDS` のロール保持者または管理者 |
 
 `RGA_LECTURE_ROLE_IDS` が空の場合、`create` / `edit` / `cancel` は管理者のみ
 実行できます。
@@ -206,6 +242,30 @@ python -m tools.retry --list     # 失敗状態を一覧表示
   不在など再試行しても成功しない失敗は期限切れにし、ログへ記録します。
 - 変更時は投稿済みの案内メッセージ（送信済みリマインダーを含む）を編集し、
   変更通知を投稿先へ送信します。中止時は中止表示に更新し、中止通知を投稿します。
+
+## トドTODO連携
+
+運営が構築した共有TODOアプリ「トドTODO」と連携します。有効にするには `.env` に
+`RGA_TODO_BASE_URL` と `RGA_TODO_LIST_TOKEN` を**両方**設定します（片方だけの設定は
+起動時エラーになります）。Botはリスト内に `RGA Assistant` という名前で参加し、
+TODO操作の履歴にはBotが操作者として記録されます。
+
+- **TODO自動登録**: 監視カテゴリのチケットに申請画像（MIME `image/*` の添付ファイル）
+  が投稿されると、チケットごとに初回のみTODOを自動登録します。タイトルはチャンネル名、
+  説明にはチケットURLを記載します。登録は60秒間隔のループで再試行され、
+  `RGA_RETRY_MAX_ATTEMPTS` 回失敗すると `error` で停止し、運営用チャンネルへ
+  失敗を通知します。
+- **API障害時の再試行**: APIが5xxを返した場合や通信エラーの場合は、
+  指数バックオフで最大3回再試行します。
+- **決着コマンド**: チケットチャンネル内で `/todo decide` を実行すると、
+  TODOを `status=done` に更新し、承認・却下の別、判断人数（判断した人数の合計）、
+  実行者をメモに追記します。同じコマンドを複数回実行した場合も判断人数に加算されます
+  （同じ人が実行した場合は1人として数えます）。
+- `doing`（判断中）はBotが操作しません。モデレータがトドTODO側で手動運用します。
+
+トドTODOのAPIトークンは秘密情報のため `.env` で管理し、ソース・ログ・チャットには
+出力しません。Botはリスト削除・メンバー削除・TODO削除など、危険なエンドポイントを
+呼び出しません。
 
 ## 通知先チャンネルの設定
 

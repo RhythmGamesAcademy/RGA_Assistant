@@ -6,3 +6,4 @@ data/
 .venv/
 .opencode/
 specification_review.md
+.worktrees/
