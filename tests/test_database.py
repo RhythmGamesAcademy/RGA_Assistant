@@ -31,7 +31,8 @@ async def bootstrap_schema(pool) -> None:
     await bootstrap.initialize()
     async with pool.connection() as connection:
         await connection.execute(
-            "TRUNCATE ticket_reminders, reminder_deliveries, lectures CASCADE"
+            "TRUNCATE ticket_reminders, reminder_deliveries, "
+            "application_image_notifications, lectures CASCADE"
         )
 
 
@@ -72,6 +73,24 @@ class ReminderDatabaseTests(unittest.IsolatedAsyncioTestCase):
         await database.cancel(10)
 
         self.assertEqual(await database.claim_due(OPENED_AT + timedelta(days=15)), [])
+
+    async def test_application_image_notification_is_claimed_once(self) -> None:
+        database = self.make_database()
+        await database.register(10, 20, "ticket-10", OPENED_AT)
+
+        self.assertTrue(await database.claim_application_image_notification(10))
+        self.assertFalse(await database.claim_application_image_notification(10))
+
+        await database.mark_application_image_notification_sent(10)
+        self.assertFalse(await database.claim_application_image_notification(10))
+
+    async def test_failed_application_image_notification_can_be_retried(self) -> None:
+        database = self.make_database()
+        await database.register(10, 20, "ticket-10", OPENED_AT)
+
+        self.assertTrue(await database.claim_application_image_notification(10))
+        await database.release_application_image_notification(10)
+        self.assertTrue(await database.claim_application_image_notification(10))
 
     async def test_registering_existing_cancelled_ticket_does_not_restore_reminder(
         self,
