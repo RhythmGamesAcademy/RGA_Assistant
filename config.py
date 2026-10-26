@@ -186,6 +186,40 @@ def parse_todo_endpoint_settings(
     return base_url, list_token
 
 
+def parse_channel_mappings(
+    value: str,
+    setting_name: str,
+) -> tuple[tuple[int, int], ...]:
+    """Parse ``category_id:channel_id`` pairs separated by commas.
+
+    Duplicate categories are rejected so a typo cannot silently reroute
+    notifications; the returned tuple preserves the configured order.
+    """
+    mappings: dict[int, int] = {}
+    for item in value.split(","):
+        entry = item.strip()
+        if not entry:
+            continue
+        category_text, separator, channel_text = entry.partition(":")
+        if not separator:
+            raise ValueError(
+                f"{setting_name} entries must be category_id:channel_id pairs."
+            )
+        try:
+            category_id = int(category_text.strip())
+            channel_id = int(channel_text.strip())
+        except ValueError as exc:
+            raise ValueError(
+                f"{setting_name} entries must be category_id:channel_id pairs."
+            ) from exc
+        if category_id <= 0 or channel_id <= 0:
+            raise ValueError(f"{setting_name} must contain positive Discord IDs.")
+        if category_id in mappings:
+            raise ValueError(f"{setting_name} must not list the same category twice.")
+        mappings[category_id] = channel_id
+    return tuple(mappings.items())
+
+
 @dataclass(frozen=True)
 class Config:
     discord_token: str
@@ -197,6 +231,7 @@ class Config:
     reminder_targets: tuple[str, ...]
     retention_days: int
     operations_channel_id: int | None
+    application_notify_channels: tuple[tuple[int, int], ...]
     operations_mention_role_id: int | None
     operations_mention_user_id: int | None
     retry_base_seconds: float
@@ -271,6 +306,10 @@ def load_config() -> Config:
     operations_channel_id = parse_optional_id(
         os.getenv("RGA_OPERATIONS_CHANNEL_ID", ""),
         "RGA_OPERATIONS_CHANNEL_ID",
+    )
+    application_notify_channels = parse_channel_mappings(
+        os.getenv("RGA_APPLICATION_NOTIFY_CHANNELS", ""),
+        "RGA_APPLICATION_NOTIFY_CHANNELS",
     )
     if "operations" in reminder_targets and operations_channel_id is None:
         raise ValueError(
@@ -370,6 +409,7 @@ def load_config() -> Config:
         reminder_targets=reminder_targets,
         retention_days=retention_days,
         operations_channel_id=operations_channel_id,
+        application_notify_channels=application_notify_channels,
         operations_mention_role_id=operations_mention_role_id,
         operations_mention_user_id=operations_mention_user_id,
         retry_base_seconds=retry_base_seconds,
