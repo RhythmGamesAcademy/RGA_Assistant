@@ -58,7 +58,8 @@ Botを再起動してください。
 | `RGA_REMINDER_UNIT` | | `days` | `seconds`/`minutes`/`hours`/`days`/`weeks`。 |
 | `RGA_REMINDER_TARGET` | | `ticket` | 送信先。`ticket`/`operations`/`both`。 |
 | `RGA_APPLICATION_STATUS_MODE` | | `simple` | 申請状況の判定方式。`simple`（Bot自前の判定・外部API不要）/ `jev`（Jev APIで多段階判定）から選択します（「申請状況の判定」節参照）。 |
-| `RGA_OPERATIONS_CHANNEL_ID` | △ | 空 | 運営用チャンネルID。`operations`/`both`では必須。申請画像の即時通知・失敗通知先も兼ねます。 |
+| `RGA_OPERATIONS_CHANNEL_ID` | △ | 空 | 運営用チャンネルID。`operations`/`both`では必須。申請画像の即時通知・失敗通知先も兼ねます（即時通知は `RGA_APPLICATION_NOTIFY_CHANNELS` でカテゴリ別に上書きできます）。 |
+| `RGA_APPLICATION_NOTIFY_CHANNELS` | | 空 | 申請画像の即時通知をカテゴリ別のチャンネルへ振り分ける設定。`カテゴリID:転送先チャンネルID` をカンマ区切りで指定します（例: `111:222,333:444`）。未指定のカテゴリは `RGA_OPERATIONS_CHANNEL_ID` へ通知します。 |
 | `RGA_OPERATIONS_MENTION_ROLE_ID` | | 空 | 運営向け通知でメンションするロールID。 |
 | `RGA_OPERATIONS_MENTION_USER_ID` | | 空 | 運営向け通知でメンションするユーザーID。`RGA_OPERATIONS_MENTION_ROLE_ID` とは併用できません。 |
 | `RGA_RETRY_BASE_SECONDS` | | `60` | 送信失敗時の再試行間隔の基準（秒）。 |
@@ -274,6 +275,18 @@ TODO操作の履歴にはBotが操作者として記録されます。
 メンションする場合は `RGA_OPERATIONS_MENTION_ROLE_ID`（ロール）または
 `RGA_OPERATIONS_MENTION_USER_ID`（ユーザー）のどちらかを設定します。両方は
 設定できません。メンションは運営向け通知にのみ付与されます。
+
+### 申請画像の即時通知のカテゴリ別振り分け
+
+申請方法が複数ある場合、`RGA_APPLICATION_NOTIFY_CHANNELS` でカテゴリごとに
+転送先チャンネルを変えられます。`カテゴリID:転送先チャンネルID` をカンマ区切りで
+指定します（例: `111:222,333:444`）。
+
+- チケットのカテゴリが指定されていれば、そのチャンネルへ即時通知します。
+- 指定のないカテゴリは `RGA_OPERATIONS_CHANNEL_ID` へ通知します（既存動作）。
+- 振り分けの対象は**申請画像の即時通知のみ**です。14日後の運営向けリマインダーと
+  失敗通知は従来どおり `RGA_OPERATIONS_CHANNEL_ID` へ送られます。
+- 同じカテゴリを2回書くことはできません（起動時エラーになります）。
 
 ## Ticket Toolとの連携設定
 
