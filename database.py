@@ -1097,6 +1097,33 @@ class TodoDatabase:
                 (now, str(channel_id)),
             )
 
+    async def get_decision(
+        self,
+        channel_id: str,
+        user_id: int | str,
+    ) -> tuple[str | None, int]:
+        """Return ``(previous_decision, judge_count)`` for one moderator.
+
+        ``previous_decision`` is ``None`` when the moderator has not decided
+        yet; ``judge_count`` is the number of distinct moderators who have
+        decided for the channel.
+        """
+        async with self.pool.connection() as connection:
+            cursor = await connection.execute(
+                """
+                SELECT d.decision AS decision,
+                       (SELECT count(*) FROM ticket_todo_decisions
+                        WHERE channel_id = %s) AS judge_count
+                FROM ticket_todo_decisions d
+                WHERE d.channel_id = %s AND d.user_id = %s
+                """,
+                (str(channel_id), str(channel_id), str(user_id)),
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                return (None, 0)
+            return (row["decision"], int(row["judge_count"]))
+
     async def record_decision(
         self,
         channel_id: str,

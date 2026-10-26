@@ -97,6 +97,31 @@ class TodoTextBuildersTests(unittest.TestCase):
             "却下｜判断人数: 1名｜実行者: 運営B (ID: 456)",
         )
 
+    def test_memo_records_a_changed_decision(self) -> None:
+        self.assertEqual(
+            build_decide_memo(
+                DECISION_APPROVAL, 1, "運営A", 123,
+                previous_decision=DECISION_REJECT,
+            ),
+            "却下から承認に変更｜判断人数: 1名｜実行者: 運営A (ID: 123)",
+        )
+        self.assertEqual(
+            build_decide_memo(
+                DECISION_REJECT, 1, "運営A", 123,
+                previous_decision=DECISION_APPROVAL,
+            ),
+            "承認から却下に変更｜判断人数: 1名｜実行者: 運営A (ID: 123)",
+        )
+
+    def test_memo_with_the_same_previous_decision_is_plain(self) -> None:
+        self.assertEqual(
+            build_decide_memo(
+                DECISION_APPROVAL, 1, "運営A", 123,
+                previous_decision=DECISION_APPROVAL,
+            ),
+            "承認｜判断人数: 1名｜実行者: 運営A (ID: 123)",
+        )
+
     def test_memo_is_truncated_to_the_api_limit(self) -> None:
         memo = build_decide_memo(DECISION_APPROVAL, 1, "な" * 2100, 1)
         self.assertLessEqual(len(memo), TODO_MAX_MEMO_LENGTH)
