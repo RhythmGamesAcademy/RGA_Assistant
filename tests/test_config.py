@@ -7,6 +7,7 @@ from config import (
     load_env_files,
     parse_cancel_trigger,
     parse_category_ids,
+    parse_channel_mappings,
     parse_discord_ids,
     parse_optional_id,
     parse_positive_float,
@@ -142,6 +143,38 @@ class ExcludedChannelConfigTests(unittest.TestCase):
     def test_rejects_invalid_excluded_channel_ids(self) -> None:
         with self.assertRaises(ValueError):
             parse_discord_ids("100,nope", "RGA_EXCLUDED_CHANNEL_IDS", allow_empty=True)
+
+
+class ChannelMappingConfigTests(unittest.TestCase):
+    def test_parses_category_channel_pairs_in_order(self) -> None:
+        self.assertEqual(
+            parse_channel_mappings(
+                " 111: 222 , 333:444", "RGA_APPLICATION_NOTIFY_CHANNELS"
+            ),
+            ((111, 222), (333, 444)),
+        )
+
+    def test_empty_value_means_no_overrides(self) -> None:
+        self.assertEqual(parse_channel_mappings("", "RGA_X"), ())
+
+    def test_rejects_invalid_pairs_and_duplicate_categories(self) -> None:
+        for value in (
+            "111222",
+            "111:",
+            ":222",
+            "111:222:333",
+            "0:222",
+            "111:-2",
+            "111:222, 111:333",
+        ):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                parse_channel_mappings(value, "RGA_X")
+
+    def test_channel_ids_may_repeat_across_categories(self) -> None:
+        self.assertEqual(
+            parse_channel_mappings("111:999, 222:999", "RGA_X"),
+            ((111, 999), (222, 999)),
+        )
 
 
 SPLIT_ENV_VARS = ("DISCORD_TOKEN", "RGA_REMINDER_VALUE")

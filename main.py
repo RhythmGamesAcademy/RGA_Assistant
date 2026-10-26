@@ -192,6 +192,22 @@ def format_application_status_line(
 
 
 
+def resolve_application_notify_channel(
+    category_id: int | None,
+    channel_mappings: tuple[tuple[int, int], ...],
+    default_channel_id: int | None,
+) -> int | None:
+    """Pick the application image notification destination for a category.
+
+    Categories listed in ``RGA_APPLICATION_NOTIFY_CHANNELS`` notify their own
+    channel; everything else falls back to the default operations channel.
+    """
+    mapping = dict(channel_mappings)
+    if category_id is not None and category_id in mapping:
+        return mapping[category_id]
+    return default_channel_id
+
+
 def build_mention(role_id: int | None, user_id: int | None) -> str | None:
     if role_id is not None:
         return f"<@&{role_id}>"
@@ -795,12 +811,17 @@ class RGAAssistant(discord.Client):
         )
 
     async def _notify_application_image(self, message: discord.Message) -> None:
-        operations_channel_id = self.config.operations_channel_id
-        if operations_channel_id is None:
+        destination_channel_id = resolve_application_notify_channel(
+            message.channel.category_id,
+            self.config.application_notify_channels,
+            self.config.operations_channel_id,
+        )
+        if destination_channel_id is None:
             logger.error(
                 "Cannot notify application image for ticket %s: "
-                "operations channel is not configured",
+                "no notification channel is configured for category %s",
                 message.channel.id,
+                message.channel.category_id,
             )
             return
 
@@ -831,7 +852,7 @@ class RGAAssistant(discord.Client):
         await self._register_ticket_todo(message.channel)
 
         try:
-            channel = await self.fetch_channel(operations_channel_id)
+            channel = await self.fetch_channel(destination_channel_id)
             if not isinstance(channel, discord.TextChannel):
                 raise TypeError("operations destination is not a text channel")
             await channel.send(
