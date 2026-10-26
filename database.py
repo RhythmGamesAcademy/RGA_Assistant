@@ -10,7 +10,7 @@ from psycopg_pool import AsyncConnectionPool
 
 logger = logging.getLogger("rga_assistant")
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _CREATE_TICKET_REMINDERS = """
 CREATE TABLE IF NOT EXISTS ticket_reminders (
@@ -41,6 +41,16 @@ CREATE TABLE IF NOT EXISTS reminder_deliveries (
     sent_at TIMESTAMPTZ,
     updated_at TIMESTAMPTZ NOT NULL,
     PRIMARY KEY (channel_id, target)
+)
+"""
+
+_CREATE_APPLICATION_IMAGE_NOTIFICATIONS = """
+CREATE TABLE IF NOT EXISTS application_image_notifications (
+    channel_id TEXT PRIMARY KEY
+        REFERENCES ticket_reminders (channel_id) ON DELETE CASCADE,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'sending', 'sent')),
+    notified_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ NOT NULL
 )
 """
 
@@ -118,6 +128,7 @@ async def open_pool(
 async def _create_schema(connection: Any, now: datetime) -> None:
     await connection.execute(_CREATE_TICKET_REMINDERS)
     await connection.execute(_CREATE_DELIVERIES)
+    await connection.execute(_CREATE_APPLICATION_IMAGE_NOTIFICATIONS)
     await connection.execute(_CREATE_LECTURES)
     await connection.execute(_CREATE_SCHEMA_VERSION)
     await connection.execute(_UPSERT_SCHEMA_VERSION, (SCHEMA_VERSION, now))
@@ -166,6 +177,14 @@ class ReminderDatabase:
             await connection.execute(
                 """
                 UPDATE reminder_deliveries
+                SET status = 'pending', updated_at = %s
+                WHERE status = 'sending'
+                """,
+                (self._now(),),
+            )
+            await connection.execute(
+                """
+                UPDATE application_image_notifications
                 SET status = 'pending', updated_at = %s
                 WHERE status = 'sending'
                 """,
@@ -225,6 +244,54 @@ class ReminderDatabase:
                 (now, str(channel_id)),
             )
             return cursor.rowcount > 0
+
+    async def claim_application_image_notification(self, channel_id: int) -> bool:
+        """Claim the one allowed application-image notification for a ticket."""
+        now = self._now()
+        async with self.pool.connection() as connection:
+            await connection.execute(
+                """
+                INSERT INTO application_image_notifications
+                    (channel_id, status, updated_at)
+                VALUES (%s, 'pending', %s)
+                ON CONFLICT (channel_id) DO NOTHING
+                """,
+                (str(channel_id), now),
+            )
+            cursor = await connection.execute(
+                """
+                UPDATE application_image_notifications
+                SET status = 'sending', updated_at = %s
+                WHERE channel_id = %s AND status = 'pending'
+                RETURNING channel_id
+                """,
+                (now, str(channel_id)),
+            )
+            return await cursor.fetchone() is not None
+
+    async def mark_application_image_notification_sent(self, channel_id: int) -> None:
+        now = self._now()
+        async with self.pool.connection() as connection:
+            await connection.execute(
+                """
+                UPDATE application_image_notifications
+                SET status = 'sent', notified_at = %s, updated_at = %s
+                WHERE channel_id = %s AND status = 'sending'
+                """,
+                (now, now, str(channel_id)),
+            )
+
+    async def release_application_image_notification(self, channel_id: int) -> None:
+        now = self._now()
+        async with self.pool.connection() as connection:
+            await connection.execute(
+                """
+                UPDATE application_image_notifications
+                SET status = 'pending', updated_at = %s
+                WHERE channel_id = %s AND status = 'sending'
+                """,
+                (now, str(channel_id)),
+            )
 
     async def claim_due(self, now: datetime | None = None) -> list[dict[str, Any]]:
         now = (now or self._now()).astimezone(timezone.utc)
