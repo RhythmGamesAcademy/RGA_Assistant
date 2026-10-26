@@ -38,6 +38,12 @@ def make_config(**overrides) -> Config:
         lecture_role_ids=(),
         lecture_reminder_minutes=15,
         lecture_announce_channel_id=None,
+        application_status_mode="simple",
+        jev_api_key=None,
+        jev_model="typesafe/jev-1.14",
+        jev_confidence_threshold=0.7,
+        jev_history_limit=50,
+        jev_evaluation_cooldown_seconds=600.0,
     )
     settings.update(overrides)
     return Config(**settings)

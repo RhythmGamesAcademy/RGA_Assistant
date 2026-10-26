@@ -149,6 +149,23 @@ def parse_cancel_trigger(value: str) -> str:
     return normalized
 
 
+APPLICATION_STATUS_MODES = {
+    "simple": "simple",
+    "jev": "jev",
+}
+
+
+def parse_application_status_mode(value: str) -> str:
+    """Parse the application status detection mode (simple or jev)."""
+    normalized = value.strip().lower()
+    if normalized not in APPLICATION_STATUS_MODES:
+        choices = ", ".join(APPLICATION_STATUS_MODES)
+        raise ValueError(
+            f"RGA_APPLICATION_STATUS_MODE must be one of: {choices}."
+        )
+    return normalized
+
+
 @dataclass(frozen=True)
 class Config:
     discord_token: str
@@ -169,6 +186,12 @@ class Config:
     lecture_role_ids: tuple[int, ...]
     lecture_reminder_minutes: int
     lecture_announce_channel_id: int | None
+    application_status_mode: str
+    jev_api_key: str | None
+    jev_model: str
+    jev_confidence_threshold: float
+    jev_history_limit: int
+    jev_evaluation_cooldown_seconds: float
 
 
 def load_config() -> Config:
@@ -277,6 +300,34 @@ def load_config() -> Config:
         os.getenv("RGA_LECTURE_ANNOUNCE_CHANNEL_ID", ""),
         "RGA_LECTURE_ANNOUNCE_CHANNEL_ID",
     )
+
+    application_status_mode = parse_application_status_mode(
+        os.getenv("RGA_APPLICATION_STATUS_MODE", "simple")
+    )
+    jev_api_key = os.getenv("RGA_JEV_API_KEY", "").strip() or None
+    if application_status_mode == "jev" and jev_api_key is None:
+        raise ValueError(
+            "RGA_JEV_API_KEY is required when RGA_APPLICATION_STATUS_MODE is jev."
+        )
+    jev_model = os.getenv("RGA_JEV_MODEL", "typesafe/jev-1.14").strip()
+    if not jev_model:
+        raise ValueError("RGA_JEV_MODEL must not be empty.")
+    jev_confidence_threshold = parse_positive_float(
+        os.getenv("RGA_JEV_CONFIDENCE_THRESHOLD", "0.7"),
+        "RGA_JEV_CONFIDENCE_THRESHOLD",
+    )
+    if not 0 < jev_confidence_threshold < 1:
+        raise ValueError(
+            "RGA_JEV_CONFIDENCE_THRESHOLD must be a number between 0 and 1."
+        )
+    jev_history_limit = parse_positive_int(
+        os.getenv("RGA_JEV_HISTORY_LIMIT", "50"),
+        "RGA_JEV_HISTORY_LIMIT",
+    )
+    jev_evaluation_cooldown_seconds = parse_positive_float(
+        os.getenv("RGA_JEV_EVALUATION_COOLDOWN_SECONDS", "600"),
+        "RGA_JEV_EVALUATION_COOLDOWN_SECONDS",
+    )
     return Config(
         discord_token=token,
         ticket_category_ids=category_ids,
@@ -296,4 +347,10 @@ def load_config() -> Config:
         lecture_role_ids=lecture_role_ids,
         lecture_reminder_minutes=lecture_reminder_minutes,
         lecture_announce_channel_id=lecture_announce_channel_id,
+        application_status_mode=application_status_mode,
+        jev_api_key=jev_api_key,
+        jev_model=jev_model,
+        jev_confidence_threshold=jev_confidence_threshold,
+        jev_history_limit=jev_history_limit,
+        jev_evaluation_cooldown_seconds=jev_evaluation_cooldown_seconds,
     )
