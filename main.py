@@ -497,7 +497,9 @@ class RGACommands(app_commands.Group):
 class RGAAssistant(discord.Client):
     def __init__(self, config: Config) -> None:
         super().__init__(
-            intents=discord.Intents(guilds=True, messages=True, message_content=True)
+            intents=discord.Intents(
+                guilds=True, messages=True, message_content=True, members=True
+            )
         )
         self.config = config
         self.pool = None
@@ -1165,8 +1167,10 @@ def main() -> None:
         client.run(config.discord_token, log_handler=None)
     except discord.PrivilegedIntentsRequired:
         logger.error(
-            "Discord Developer Portalで Message Content Intent を有効にしてください。"
-            "Applications > 対象Bot > Bot > Privileged Gateway Intents から設定できます。"
+            "Discord Developer Portalで Message Content Intent と "
+            "Server Members Intent を有効にしてください。"
+            "Applications > 対象Bot > Bot > Privileged Gateway Intents "
+            "から設定できます。"
         )
     except KeyboardInterrupt:
         logger.info("Bot stopped")

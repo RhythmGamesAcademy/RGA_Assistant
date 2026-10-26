@@ -250,6 +250,7 @@ class Config:
     todo_base_url: str | None
     todo_list_token: str | None
     todo_role_ids: tuple[int, ...]
+    todo_excluded_user_ids: tuple[int, ...]
 
 
 def load_config() -> Config:
@@ -399,6 +400,11 @@ def load_config() -> Config:
         "RGA_TODO_ROLE_IDS",
         allow_empty=True,
     )
+    todo_excluded_user_ids = parse_discord_ids(
+        os.getenv("RGA_TODO_EXCLUDED_USER_IDS", ""),
+        "RGA_TODO_EXCLUDED_USER_IDS",
+        allow_empty=True,
+    )
     return Config(
         discord_token=token,
         ticket_category_ids=category_ids,
@@ -428,4 +434,5 @@ def load_config() -> Config:
         todo_base_url=todo_base_url,
         todo_list_token=todo_list_token,
         todo_role_ids=todo_role_ids,
+        todo_excluded_user_ids=todo_excluded_user_ids,
     )
