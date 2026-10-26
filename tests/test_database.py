@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from database import (
     SCHEMA_VERSION,
     ReminderDatabase,
+    TodoDatabase,
     ensure_compatible_event_loop_policy,
     open_pool,
 )
@@ -33,7 +34,7 @@ async def bootstrap_schema(pool) -> None:
         await connection.execute(
             "TRUNCATE ticket_reminders, reminder_deliveries, "
             "application_image_notifications, ticket_application_status, "
-            "lectures CASCADE"
+            "lectures, ticket_todos, ticket_todo_decisions CASCADE"
         )
 
 
@@ -283,6 +284,88 @@ class SchemaTests(unittest.IsolatedAsyncioTestCase):
             len(await restarted.claim_due(OPENED_AT + timedelta(days=14))),
             1,
         )
+
+
+@requires_database
+class TodoDatabaseTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self.pool = await open_pool(TEST_DATABASE_URL)
+        await bootstrap_schema(self.pool)
+
+    async def asyncTearDown(self) -> None:
+        await self.pool.close()
+
+    def make_database(self, **kwargs) -> TodoDatabase:
+        return TodoDatabase(
+            self.pool,
+            retry_base_seconds=60.0,
+            retry_max_seconds=21600.0,
+            retry_max_attempts=2,
+            **kwargs,
+        )
+
+    async def register_ticket(self, database: ReminderDatabase, channel_id: int = 10):
+        return await database.register(channel_id, 20, "ticket-10", OPENED_AT)
+
+    async def test_registers_todo_slot_once(self) -> None:
+        reminders = ReminderDatabase(self.pool, reminder_after=timedelta(days=14))
+        self.assertTrue(await self.register_ticket(reminders))
+        todo = self.make_database()
+
+        self.assertTrue(await todo.register_todo(10))
+        self.assertFalse(await todo.register_todo(10))
+
+        due = await todo.claim_due_registrations()
+        self.assertEqual(len(due), 1)
+        self.assertEqual(due[0]["channel_id"], "10")
+        self.assertEqual(due[0]["channel_name"], "ticket-10")
+        self.assertEqual(due[0]["guild_id"], "20")
+
+        await todo.mark_todo_registered("10", "todo-uuid-1")
+        self.assertEqual(await todo.claim_due_registrations(), [])
+        row = await todo.get_todo("10")
+        self.assertEqual(row["todo_id"], "todo-uuid-1")
+        self.assertEqual(row["status"], "registered")
+        self.assertIs(row["decided"], False)
+
+    async def test_failed_registration_backs_off_then_errors(self) -> None:
+        reminders = ReminderDatabase(self.pool, reminder_after=timedelta(days=14))
+        await self.register_ticket(reminders)
+        todo = self.make_database()
+        await todo.register_todo(10)
+
+        now = datetime.now(timezone.utc)
+        self.assertEqual(len(await todo.claim_due_registrations(now)), 1)
+        status, attempts = await todo.fail_todo_registration("10", "boom", now)
+        self.assertEqual((status, attempts), ("pending", 1))
+        self.assertEqual(await todo.claim_due_registrations(now), [])
+
+        self.assertEqual(
+            len(await todo.claim_due_registrations(now + timedelta(seconds=60))), 1
+        )
+        status, attempts = await todo.fail_todo_registration(
+            "10", "boom again", now + timedelta(seconds=60)
+        )
+        self.assertEqual((status, attempts), ("error", 2))
+        self.assertEqual(await todo.claim_due_registrations(), [])
+        row = await todo.get_todo("10")
+        self.assertEqual(row["status"], "error")
+        self.assertEqual(row["last_error"], "boom again")
+
+    async def test_record_decision_counts_distinct_judges(self) -> None:
+        reminders = ReminderDatabase(self.pool, reminder_after=timedelta(days=14))
+        await self.register_ticket(reminders)
+        todo = self.make_database()
+        await todo.register_todo(10)
+        await todo.mark_todo_registered("10", "todo-uuid-1")
+
+        self.assertEqual(await todo.record_decision("10", 1, "approval"), 1)
+        self.assertEqual(await todo.record_decision("10", 1, "reject"), 1)
+        self.assertEqual(await todo.record_decision("10", 2, "approval"), 2)
+
+        await todo.mark_todo_decided("10")
+        row = await todo.get_todo("10")
+        self.assertIs(row["decided"], True)
 
 
 if __name__ == "__main__":

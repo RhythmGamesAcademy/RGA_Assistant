@@ -3,8 +3,8 @@
 Discord bot (`discord.py`) that watches configured Discord categories for ticket
 channels (managed by Ticket Tool) and posts one reminder N time after a channel
 was created. Reminder state persists in PostgreSQL. Also schedules lecture
-announcements/reminders via slash commands. Flat module project — no packages,
-cogs, or service layers.
+announcements/reminders via slash commands and integrates the shared TodoTodo
+app (Phase 5). Flat module project — no packages, cogs, or service layers.
 
 - `main.py` — `RGAAssistant(discord.Client)`: event handlers, ticket reminder
   loop, embed builders, `/rga help` group, `CommandTree` sync, and pure helpers
@@ -12,13 +12,17 @@ cogs, or service layers.
 - `lecture.py` — Phase 3 lecture schedule: pure helpers
   (`parse_start_time`, `has_lecture_permission`, embed builders), the
   `/lecture` `app_commands.Group`, and `LectureScheduler` (30s `tasks.loop`).
+- `todotodo.py` — Phase 5 TodoTodo integration: `TodoTodoClient` (REST API
+  wrapper with exponential-backoff retries on 5xx; never logs the token or
+  URL), `TodoCommands` (`/todo decide`), and `TodoRegistrationScheduler`
+  (60s `tasks.loop` for TODO auto-registration).
 - `embeds.py` — shared embed colors (`COLOR_*`), `truncate`, `error_embed`,
   `success_embed`. Every bot message/response is an embed; only the operations
   mention is plain `content`.
 - `config.py` — env parsing into a frozen `Config`.
-- `database.py` — `ReminderDatabase` (tickets) and `LectureDatabase` (lectures),
-  the only PostgreSQL access layer. Both share one async `AsyncConnectionPool`
-  (`open_pool`).
+- `database.py` — `ReminderDatabase` (tickets), `LectureDatabase` (lectures),
+  and `TodoDatabase` (TodoTodo mapping/decisions), the only PostgreSQL access
+  layer. All share one async `AsyncConnectionPool` (`open_pool`).
 - `tools/retry.py` — async CLI (`asyncio.run`) to reset failed ticket deliveries
   (`error` → `pending`).
 - `tools/purge.py` — async CLI that deletes finished rows older than
@@ -27,9 +31,10 @@ cogs, or service layers.
   state into PostgreSQL (`ON CONFLICT DO NOTHING`).
 - `deploy/rga-assistant.service` — systemd unit template.
 - `specification.md` — aspirational multi-phase spec. **Phases 2 (ticket
-  reminder) and 3 (lecture schedule) are implemented.** Inquiry classification
-  (Phase 4) and task-management integration (Phase 5) do NOT exist. Don't
-  scaffold them unless asked.
+  reminder), 3 (lecture schedule), 4 (application image notification /
+  application status), and 5 (TodoTodo integration) are implemented.** Inquiry
+  classification (the remaining Phase 4 item) does NOT exist. Don't scaffold
+  it unless asked.
 
 ## Environment and commands
 
@@ -53,7 +58,8 @@ fail if run from another directory.
 ## Config (`.env` + `.setting`, both KEY=VALUE, loaded by `load_env_files()` in `config.py`)
 
 - **Secrets live in `.env`**: `DISCORD_TOKEN`, `RGA_DATABASE_URL`,
-  `RGA_TEST_DATABASE_URL`. **Deployment-specific settings live in `.setting`**:
+  `RGA_TEST_DATABASE_URL`, `RGA_JEV_API_KEY`, `RGA_TODO_BASE_URL`,
+  `RGA_TODO_LIST_TOKEN`. **Deployment-specific settings live in `.setting`**:
   everything else below. Templates: `.env.example` / `.setting.example`
   (`.env` and `.setting` are gitignored).
 - Load order matters: OS environment variables win over both files, and
@@ -78,6 +84,9 @@ fail if run from another directory.
 - Lectures: `RGA_LECTURE_ROLE_IDS` (comma-separated; empty = administrators only),
   `RGA_LECTURE_REMINDER_MINUTES` (default 15), `RGA_LECTURE_ANNOUNCE_CHANNEL_ID`
   (default `/lecture create` post target; per-lecture override allowed).
+- TodoTodo: `RGA_TODO_BASE_URL` + `RGA_TODO_LIST_TOKEN` (both in `.env`; set
+  together or the integration stays off — a half-configured state is a config
+  error), `RGA_TODO_ROLE_IDS` (comma-separated; empty = administrators only).
 - Legacy vars still read: `RGA_TICKET_CATEGORY_ID`, `RGA_REMINDER_DAYS`.
 - Invalid config exits with a message. Discord **Message Content Intent** must be
   enabled in the Developer Portal (the cancel trigger reads attachments, which
@@ -136,6 +145,21 @@ fail if run from another directory.
   already-`sent` reminder stays `sent` (no duplicate). `/lecture list` is public;
   other lecture subcommands require `RGA_LECTURE_ROLE_IDS` (or administrator).
   Lecture messages use JST `YYYY/MM/DD HH:MM` input/output; timestamps stored UTC.
+- TodoTodo (Phase 5): enabled only when both `RGA_TODO_BASE_URL` and
+  `RGA_TODO_LIST_TOKEN` are set. On startup the bot joins the list as the
+  member `RGA Assistant` (cached `assistant_user_id`, joined lazily when
+  missing). An application image detection registers **one** TodoTodo item per
+  ticket (`register_todo` is `ON CONFLICT DO NOTHING`; immediate attempt plus a
+  60s retry loop). `ticket_todos.status` is `pending → registered|error`
+  (attempts/`next_attempt_at` backoff like deliveries; both tables cascade from
+  `ticket_reminders`, so `tools.purge` removes them together). Client-level
+  retries: 5xx and network errors get 3 attempts with 1s/2s backoff; 4xx fails
+  immediately. `/todo decide` (choice 承認/却下) requires `RGA_TODO_ROLE_IDS`
+  (or administrator): it PATCHes `status=done` once (guarded by the `decided`
+  flag) and appends an append-only memo (承認/却下の別・判断人数・実行者);
+  decisions are stored in `ticket_todo_decisions` (PK channel+user,
+  last-write-wins) and 判断人数 counts distinct judges. **The list token is in
+  every API URL — never log URLs or raw aiohttp exception messages.**
 - Commands are global-synced in `setup_hook`; invites need the
   `applications.commands` scope.
 - psycopg's async connections refuse Windows' default `ProactorEventLoop`. Call

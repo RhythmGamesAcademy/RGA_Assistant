@@ -10,7 +10,7 @@ from psycopg_pool import AsyncConnectionPool
 
 logger = logging.getLogger("rga_assistant")
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _CREATE_TICKET_REMINDERS = """
 CREATE TABLE IF NOT EXISTS ticket_reminders (
@@ -101,6 +101,31 @@ CREATE TABLE IF NOT EXISTS schema_version (
 )
 """
 
+_CREATE_TICKET_TODOS = """
+CREATE TABLE IF NOT EXISTS ticket_todos (
+    channel_id TEXT PRIMARY KEY
+        REFERENCES ticket_reminders (channel_id) ON DELETE CASCADE,
+    todo_id TEXT,
+    decided BOOLEAN NOT NULL DEFAULT FALSE,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'registered', 'error')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TIMESTAMPTZ,
+    last_error TEXT,
+    updated_at TIMESTAMPTZ NOT NULL
+)
+"""
+
+_CREATE_TICKET_TODO_DECISIONS = """
+CREATE TABLE IF NOT EXISTS ticket_todo_decisions (
+    channel_id TEXT NOT NULL
+        REFERENCES ticket_todos (channel_id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL,
+    decision TEXT NOT NULL CHECK (decision IN ('approval', 'reject')),
+    updated_at TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (channel_id, user_id)
+)
+"""
+
 _UPSERT_SCHEMA_VERSION = """
 INSERT INTO schema_version (id, version, updated_at)
 VALUES (TRUE, %s, %s)
@@ -143,6 +168,8 @@ async def _create_schema(connection: Any, now: datetime) -> None:
     await connection.execute(_CREATE_APPLICATION_IMAGE_NOTIFICATIONS)
     await connection.execute(_CREATE_APPLICATION_STATUS)
     await connection.execute(_CREATE_LECTURES)
+    await connection.execute(_CREATE_TICKET_TODOS)
+    await connection.execute(_CREATE_TICKET_TODO_DECISIONS)
     await connection.execute(_CREATE_SCHEMA_VERSION)
     await connection.execute(_UPSERT_SCHEMA_VERSION, (SCHEMA_VERSION, now))
 
@@ -917,6 +944,193 @@ class LectureDatabase:
                 """,
                 ((error or "")[:500], self._now(), lecture_id),
             )
+
+    @staticmethod
+    def _now() -> datetime:
+        return datetime.now(timezone.utc)
+
+
+class TodoDatabase:
+    """PostgreSQL access layer for the TodoTodo integration (Phase 5).
+
+    Maps ticket channels to their TodoTodo items and tracks which moderators
+    have recorded a decision. Both tables cascade from ``ticket_reminders``,
+    so ``tools.purge`` removes finished tickets together with their items.
+    """
+
+    def __init__(
+        self,
+        pool: AsyncConnectionPool,
+        retry_base_seconds: float = 60.0,
+        retry_max_seconds: float = 21600.0,
+        retry_max_attempts: int = 6,
+    ) -> None:
+        if retry_base_seconds <= 0 or retry_max_seconds <= 0:
+            raise ValueError("retry delays must be positive.")
+        if retry_max_attempts <= 0:
+            raise ValueError("retry_max_attempts must be positive.")
+        self.pool = pool
+        self.retry_base_seconds = retry_base_seconds
+        self.retry_max_seconds = retry_max_seconds
+        self.retry_max_attempts = retry_max_attempts
+
+    async def ensure_schema(self) -> None:
+        """Create the schema without touching any stored state."""
+        async with self.pool.connection() as connection:
+            await _create_schema(connection, self._now())
+
+    async def initialize(self) -> None:
+        async with self.pool.connection() as connection:
+            await _create_schema(connection, self._now())
+
+    async def register_todo(self, channel_id: int) -> bool:
+        """Reserve the TodoTodo item slot for a channel (exactly once)."""
+        now = self._now()
+        async with self.pool.connection() as connection:
+            cursor = await connection.execute(
+                """
+                INSERT INTO ticket_todos (channel_id, status, updated_at)
+                VALUES (%s, 'pending', %s)
+                ON CONFLICT (channel_id) DO NOTHING
+                """,
+                (str(channel_id), now),
+            )
+            return cursor.rowcount > 0
+
+    async def claim_due_registrations(
+        self, now: datetime | None = None
+    ) -> list[dict[str, Any]]:
+        """Select pending TodoTodo registrations whose retry delay has passed."""
+        now = (now or self._now()).astimezone(timezone.utc)
+        async with self.pool.connection() as connection:
+            cursor = await connection.execute(
+                """
+                SELECT t.channel_id AS channel_id,
+                       t.attempts AS attempts,
+                       r.channel_name AS channel_name,
+                       r.guild_id AS guild_id
+                FROM ticket_todos t
+                JOIN ticket_reminders r USING (channel_id)
+                WHERE t.status = 'pending'
+                  AND (t.next_attempt_at IS NULL OR t.next_attempt_at <= %s)
+                ORDER BY t.updated_at
+                FOR UPDATE OF t SKIP LOCKED
+                """,
+                (now,),
+            )
+            return await cursor.fetchall()
+
+    async def mark_todo_registered(self, channel_id: str, todo_id: str) -> None:
+        now = self._now()
+        async with self.pool.connection() as connection:
+            await connection.execute(
+                """
+                UPDATE ticket_todos
+                SET todo_id = %s, status = 'registered', last_error = NULL,
+                    updated_at = %s
+                WHERE channel_id = %s
+                """,
+                (todo_id, now, str(channel_id)),
+            )
+
+    async def fail_todo_registration(
+        self,
+        channel_id: str,
+        error: str,
+        now: datetime | None = None,
+    ) -> tuple[str, int]:
+        """Record a failed TodoTodo registration attempt with backoff."""
+        now = (now or self._now()).astimezone(timezone.utc)
+        message = (error or "")[:500]
+        async with self.pool.connection() as connection:
+            async with connection.transaction():
+                cursor = await connection.execute(
+                    """
+                    SELECT attempts FROM ticket_todos
+                    WHERE channel_id = %s AND status = 'pending'
+                    FOR UPDATE
+                    """,
+                    (str(channel_id),),
+                )
+                row = await cursor.fetchone()
+                if row is None:
+                    return ("unknown", 0)
+                attempts = row["attempts"] + 1
+                if attempts >= self.retry_max_attempts:
+                    status = "error"
+                    next_attempt_at = None
+                else:
+                    status = "pending"
+                    delay = min(
+                        self.retry_max_seconds,
+                        self.retry_base_seconds * (2 ** (attempts - 1)),
+                    )
+                    next_attempt_at = now + timedelta(seconds=delay)
+                await connection.execute(
+                    """
+                    UPDATE ticket_todos
+                    SET attempts = %s, next_attempt_at = %s, last_error = %s,
+                        updated_at = %s
+                    WHERE channel_id = %s
+                    """,
+                    (attempts, next_attempt_at, message, now, str(channel_id)),
+                )
+                return (status, attempts)
+
+    async def get_todo(self, channel_id: str) -> dict[str, Any] | None:
+        async with self.pool.connection() as connection:
+            cursor = await connection.execute(
+                "SELECT * FROM ticket_todos WHERE channel_id = %s",
+                (str(channel_id),),
+            )
+            return await cursor.fetchone()
+
+    async def mark_todo_decided(self, channel_id: str) -> None:
+        now = self._now()
+        async with self.pool.connection() as connection:
+            await connection.execute(
+                """
+                UPDATE ticket_todos
+                SET decided = TRUE, updated_at = %s
+                WHERE channel_id = %s
+                """,
+                (now, str(channel_id)),
+            )
+
+    async def record_decision(
+        self,
+        channel_id: str,
+        user_id: int | str,
+        decision: str,
+    ) -> int:
+        """Store one moderator's decision and return the judge count.
+
+        A moderator recording again replaces their previous decision
+        (last-write-wins); the returned count is the number of distinct
+        moderators who have decided for the channel.
+        """
+        now = self._now()
+        async with self.pool.connection() as connection:
+            await connection.execute(
+                """
+                INSERT INTO ticket_todo_decisions
+                    (channel_id, user_id, decision, updated_at)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (channel_id, user_id) DO UPDATE
+                SET decision = EXCLUDED.decision,
+                    updated_at = EXCLUDED.updated_at
+                """,
+                (str(channel_id), str(user_id), decision, now),
+            )
+            cursor = await connection.execute(
+                """
+                SELECT count(*) AS count FROM ticket_todo_decisions
+                WHERE channel_id = %s
+                """,
+                (str(channel_id),),
+            )
+            row = await cursor.fetchone()
+            return int(row["count"])
 
     @staticmethod
     def _now() -> datetime:
