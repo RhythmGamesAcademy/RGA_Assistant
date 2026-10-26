@@ -93,7 +93,10 @@ fail if run from another directory.
   together or the integration stays off — a half-configured state is a config
   error), `RGA_TODO_ROLE_IDS` (comma-separated; empty = administrators only),
   `RGA_TODO_EXCLUDED_USER_IDS` (comma-separated; may not run `/todo decide`
-  and dropped from the threshold denominator).
+  and dropped from the threshold denominator), `RGA_TODO_DECIDE_CHANNELS`
+  (`category_id:channel_id` pairs, comma separated; the only channels from
+  which `/todo decide` may run, one per category; unset = the command is
+  disabled everywhere).
 - Legacy vars still read: `RGA_TICKET_CATEGORY_ID`, `RGA_REMINDER_DAYS`.
 - Invalid config exits with a message. Discord **Message Content Intent** and
   **Server Members Intent** must be
@@ -164,10 +167,15 @@ fail if run from another directory.
   (attempts/`next_attempt_at` backoff like deliveries; both tables cascade from
   `ticket_reminders`, so `tools.purge` removes them together). Client-level
   retries: 5xx and network errors get 3 attempts with 1s/2s backoff; 4xx fails
-  immediately. `/todo decide` (choice 承認/却下) requires `RGA_TODO_ROLE_IDS`
+  immediately. `/todo decide <ticket channel> (choice 承認/却下)` requires
+  `RGA_TODO_ROLE_IDS`
   (or administrator); excluded users (`RGA_TODO_EXCLUDED_USER_IDS`, `.setting`,
   comma-separated) may not run it at all and are dropped from the threshold
-  denominator. When decide roles are configured, completion is majority rule:
+  denominator. It runs ONLY from the per-category channel configured in
+  `RGA_TODO_DECIDE_CHANNELS` (never inside the ticket); the settle target is
+  the required `ticket` channel parameter (concurrent applications), and
+  responses/memos name the ticket. When decide roles are configured,
+  completion is majority rule:
   approval and reject are tallied separately (GROUP BY in
   `TodoDatabase.decision_tallies`) and whichever side reaches
   `decide_threshold(holders)` = ceil(role holders − excluded / 2, min 1) PATCHes
