@@ -2,6 +2,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+import aiohttp
 import discord
 import psycopg
 from discord import app_commands
@@ -23,6 +24,12 @@ from embeds import (
     error_embed,
     success_embed,
     truncate,
+)
+from jev import (
+    JevError,
+    assessment_to_status,
+    build_channel_state,
+    evaluate_application_status,
 )
 from lecture import LectureCommands, LectureScheduler, has_lecture_permission
 
@@ -118,6 +125,7 @@ def build_operations_reminder_embed(
     days: int,
     guild_id: str,
     channel_id: str,
+    application_status_line: str | None = None,
 ) -> discord.Embed:
     opened_at_jst = opened_at.astimezone(JST)
     embed = discord.Embed(
@@ -137,7 +145,45 @@ def build_operations_reminder_embed(
         value=f"https://discord.com/channels/{guild_id}/{channel_id}",
         inline=False,
     )
+    if application_status_line is not None:
+        embed.add_field(
+            name="申請の確認", value=truncate(
+                application_status_line, MAX_FIELD_VALUE
+            ),
+            inline=False,
+        )
     return embed
+
+
+def format_application_status_line(
+    status: dict[str, Any] | None,
+    confidence_threshold: float,
+) -> str:
+    """Format the stored application status for the operations reminder field."""
+    if not status or status.get("has_application") is None:
+        return "未判定（まだ申請の投稿を確認していません）"
+    has_application = bool(status["has_application"])
+    has_text = "true" if has_application else "false"
+    method = status.get("method") or "simple"
+    if method in ("jev", "jev_fallback"):
+        detail = status.get("detail") or "判断不能"
+        confidence = status.get("confidence")
+        confidence_text = (
+            f"、確信度 {confidence:.2f}"
+            if isinstance(confidence, (int, float))
+            else ""
+        )
+        suffix = ""
+        if method == "jev_fallback":
+            suffix = " — Jevが利用できなかったため簡易判定"
+        elif (
+            isinstance(confidence, (int, float))
+            and confidence < confidence_threshold
+        ):
+            suffix = " — 要人確認"
+        return f"{has_text}（jev: {detail}{confidence_text}）{suffix}"
+    return f"{has_text}（simple）"
+
 
 
 def build_mention(role_id: int | None, user_id: int | None) -> str | None:
@@ -157,7 +203,9 @@ def _mention_rules(role_id: int | None, user_id: int | None) -> discord.AllowedM
 
 
 def build_delivery_message(
-    delivery: dict[str, Any], config: Config
+    delivery: dict[str, Any],
+    config: Config,
+    application_status: dict[str, Any] | None = None,
 ) -> tuple[str | None, discord.Embed, discord.AllowedMentions]:
     """Build the content, embed, and mention rules for one reminder delivery."""
     opened_at = delivery["opened_at"]
@@ -173,6 +221,9 @@ def build_delivery_message(
                 days,
                 delivery["guild_id"],
                 delivery["channel_id"],
+                application_status_line=format_application_status_line(
+                    application_status, config.jev_confidence_threshold
+                ),
             ),
             _mention_rules(role_id, user_id),
         )
@@ -423,9 +474,12 @@ class RGAAssistant(discord.Client):
         self.lecture_database: LectureDatabase | None = None
         self.tree = app_commands.CommandTree(self)
         self.lecture_scheduler: LectureScheduler | None = None
+        self.jev_session: aiohttp.ClientSession | None = None
 
     async def setup_hook(self) -> None:
         assert self.pool is None
+        if self.config.application_status_mode == "jev":
+            self.jev_session = aiohttp.ClientSession()
         self.pool = await open_pool(self.config.database_url)
         self.database = ReminderDatabase(
             self.pool,
@@ -453,6 +507,9 @@ class RGAAssistant(discord.Client):
 
     async def close(self) -> None:
         logger.info("Shutting down RGA Assistant")
+        if self.jev_session is not None:
+            await self.jev_session.close()
+            self.jev_session = None
         if self.pool is not None:
             await self.pool.close()
             self.pool = None
@@ -547,6 +604,128 @@ class RGAAssistant(discord.Client):
                     self.config.cancel_trigger,
                     message.channel.id,
                 )
+
+        await self._update_application_status(message)
+
+    async def _update_application_status(self, message: discord.Message) -> None:
+        """Record or re-evaluate the application status of a ticket channel."""
+        if not self._is_monitored_ticket_channel(message.channel):
+            return
+        try:
+            if self.config.application_status_mode == "jev":
+                await self._evaluate_application_with_jev(message)
+            else:
+                await self._record_simple_application_status(message)
+        except Exception:  # status tracking must never break message handling
+            logger.exception(
+                "Failed to update application status for ticket %s",
+                message.channel.id,
+            )
+
+    async def _record_simple_application_status(
+        self, message: discord.Message
+    ) -> None:
+        """Track the image-based application criterion without any external API."""
+        image_attached = message_has_image_attachment(
+            tuple(attachment.content_type for attachment in message.attachments)
+        )
+        channel_id = str(message.channel.id)
+        current = await self.database.get_application_status(channel_id)
+        if (
+            current is not None
+            and current.get("method") == "simple"
+            and bool(current.get("has_application")) == image_attached
+        ):
+            return
+        await self.database.set_application_status(
+            channel_id, image_attached, "simple"
+        )
+
+    async def _collect_channel_state_messages(
+        self, channel: discord.TextChannel
+    ) -> list[dict[str, Any]]:
+        """Collect the recent channel history (oldest first) as plain dicts."""
+        messages = []
+        async for history_message in channel.history(
+            limit=self.config.jev_history_limit
+        ):
+            messages.append(
+                {
+                    "author": getattr(
+                        history_message.author, "display_name",
+                        str(history_message.author),
+                    ),
+                    "content": history_message.content or "(Embed)",
+                    "attachments": [
+                        {"content_type": attachment.content_type}
+                        for attachment in history_message.attachments
+                    ],
+                }
+            )
+        messages.reverse()
+        return messages
+
+    async def _evaluate_application_with_jev(
+        self, message: discord.Message
+    ) -> None:
+        """Ask Jev about the channel history, falling back to simple detection."""
+        channel_id = str(message.channel.id)
+        now = datetime.now(timezone.utc)
+        current = await self.database.get_application_status(channel_id)
+        if current is not None and current.get("method") == "jev":
+            evaluated_at = current.get("updated_at")
+            cooldown = timedelta(seconds=self.config.jev_evaluation_cooldown_seconds)
+            if (
+                isinstance(evaluated_at, datetime)
+                and now - evaluated_at.astimezone(timezone.utc) < cooldown
+            ):
+                return
+
+        state = build_channel_state(await self._collect_channel_state_messages(
+            message.channel
+        ))
+        assert self.jev_session is not None
+        try:
+            assessment = await evaluate_application_status(
+                self.jev_session,
+                self.config.jev_api_key or "",
+                self.config.jev_model,
+                state,
+            )
+        except JevError as exc:
+            # The issue allows falling back to simple detection on Jev failure.
+            logger.warning(
+                "Jev evaluation failed for ticket %s; falling back to "
+                "simple detection: %s",
+                message.channel.id,
+                exc,
+            )
+            await self.database.set_application_status(
+                channel_id,
+                message_has_image_attachment(
+                    tuple(
+                        attachment.content_type
+                        for attachment in message.attachments
+                    )
+                ),
+                "jev_fallback",
+            )
+            return
+
+        has_application, detail = assessment_to_status(assessment)
+        await self.database.set_application_status(
+            channel_id=channel_id,
+            has_application=has_application,
+            method="jev",
+            detail=detail,
+            confidence=assessment.confidence,
+        )
+        logger.info(
+            "Jev application status for ticket %s: %s (confidence=%s)",
+            message.channel.id,
+            detail,
+            assessment.confidence,
+        )
 
     def _matches_trigger(self, message: discord.Message) -> bool:
         return is_reminder_cancel_message(
@@ -780,7 +959,21 @@ class RGAAssistant(discord.Client):
         if not await self.database.is_sending(delivery["channel_id"], target):
             return
 
-        content, embed, allowed_mentions = build_delivery_message(delivery, self.config)
+        application_status = None
+        if target == "operations":
+            try:
+                application_status = await self.database.get_application_status(
+                    delivery["channel_id"]
+                )
+            except psycopg.Error:
+                logger.exception(
+                    "Failed to load application status for ticket %s",
+                    delivery["channel_id"],
+                )
+
+        content, embed, allowed_mentions = build_delivery_message(
+            delivery, self.config, application_status
+        )
 
         try:
             sent_message = await channel.send(

@@ -32,7 +32,8 @@ async def bootstrap_schema(pool) -> None:
     async with pool.connection() as connection:
         await connection.execute(
             "TRUNCATE ticket_reminders, reminder_deliveries, "
-            "application_image_notifications, lectures CASCADE"
+            "application_image_notifications, ticket_application_status, "
+            "lectures CASCADE"
         )
 
 

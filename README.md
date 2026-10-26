@@ -56,6 +56,7 @@ Botを再起動してください。
 | `RGA_REMINDER_VALUE` | | `14` | リマインダーまでの時間。 |
 | `RGA_REMINDER_UNIT` | | `days` | `seconds`/`minutes`/`hours`/`days`/`weeks`。 |
 | `RGA_REMINDER_TARGET` | | `ticket` | 送信先。`ticket`/`operations`/`both`。 |
+| `RGA_APPLICATION_STATUS_MODE` | | `simple` | 申請状況の判定方式。`simple`（Bot自前の判定・外部API不要）/ `jev`（Jev APIで多段階判定）から選択します（「申請状況の判定」節参照）。 |
 | `RGA_OPERATIONS_CHANNEL_ID` | △ | 空 | 運営用チャンネルID。`operations`/`both`では必須。申請画像の即時通知・失敗通知先も兼ねます。 |
 | `RGA_OPERATIONS_MENTION_ROLE_ID` | | 空 | 運営向け通知でメンションするロールID。 |
 | `RGA_OPERATIONS_MENTION_USER_ID` | | 空 | 運営向け通知でメンションするユーザーID。`RGA_OPERATIONS_MENTION_ROLE_ID` とは併用できません。 |
@@ -67,6 +68,11 @@ Botを再起動してください。
 | `RGA_LECTURE_ROLE_IDS` | | 空 | 講義コマンドを実行できるロールID（カンマ区切り）。空の場合は管理者のみ。 |
 | `RGA_LECTURE_REMINDER_MINUTES` | | `15` | 講義開始の何分前にリマインダーを送るか。 |
 | `RGA_LECTURE_ANNOUNCE_CHANNEL_ID` | | 空 | 講義案内の既定投稿先チャンネル。`/lecture create` で個別指定も可能。 |
+| `RGA_JEV_API_KEY` | △ | 空 | Jev APIキー。`RGA_APPLICATION_STATUS_MODE=jev` のとき必須。シークレットなので `.env` に記載します。 |
+| `RGA_JEV_MODEL` | | `typesafe/jev-1.14` | Jev APIに渡すモデルID。 |
+| `RGA_JEV_CONFIDENCE_THRESHOLD` | | `0.7` | この確信度未満のJev判定は「要人確認」として表示します。 |
+| `RGA_JEV_HISTORY_LIMIT` | | `50` | Jevに渡すチャンネル履歴の最大件数。 |
+| `RGA_JEV_EVALUATION_COOLDOWN_SECONDS` | | `600` | 同じチケットのJev再評価までの最短間隔（秒、クレジット節約用）。 |
 
 旧設定 `RGA_TICKET_CATEGORY_ID`（単一カテゴリ）と `RGA_REMINDER_DAYS` も
 引き続き利用できます。
@@ -146,6 +152,31 @@ Botを再起動してください。
 権限不足（`Forbidden`）や送信先の不在など、再試行しても成功しないと判断できる
 失敗は、バックオフせず即座に `error` 状態にします。チャンネルが取得できず
 `NotFound` の場合は、チケットが閉じたとみなしてキャンセルします。
+
+### 申請状況の判定
+
+運営向けリマインダーの field には「申請の確認」を表示します。判定方式は
+`RGA_APPLICATION_STATUS_MODE` で選択できます（併用はしません）。
+
+- `simple`（既定）: 外部APIを使わず、Bot自前の添付画像検知
+  （`RGA_REMINDER_CANCEL_TRIGGER=image` と同一基準、MIME `image/*`）で
+  true / false を記録します。確実・無料です。
+- `jev`: チャンネル履歴を JSON 化して Jev（TypeSafe AI の判断モデル）に渡し、
+  「未申請 / 申請中 / 審査中 / 判断不能」の多段階状況と確率・確信度を取得します。
+  `RGA_JEV_EVALUATION_COOLDOWN_SECONDS` 秒経過するまでは同じチケットを
+  再評価しません。API key 未設定・通信失敗・Jev障害時は簡易判定に
+  フォールバックします。確信度が `RGA_JEV_CONFIDENCE_THRESHOLD` 未満の結果は
+  「要人確認」として表示します。
+
+判定結果は DB（`ticket_application_status`）に記録され、リマインダーの
+キャンセル済み・送信済みチケットも継続して判定し、再起動後も保持されます。
+
+留意事項: Jevは画像を state に渡せないため、添付は MIME タイプ等のメタデータ
+のみ送信します。申請者個人情報を含む会話を外部APIへ送るため、運用方針を確認
+してから `jev` を有効化してください（既定は `simple`）。日本語精度は未検証のため
+Jev Playground（https://thejevai.com/playground）で実チケット文面を検証してから
+使用してください。Jevは早期アクセス（クレジット制・入力のみ課金）のため、
+可用性と費用も確認してください。
 
 ## 送信失敗からの復旧
 
