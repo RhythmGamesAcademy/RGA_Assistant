@@ -37,7 +37,8 @@ Botを再起動してください。
 `.setting.example` です。`RGA_REMINDER_CANCEL_TRIGGER=image` のような既定値と同値の
 行は、読みやすさのためテンプレートに入れていません。
 
-- `.env`: `DISCORD_TOKEN` / `RGA_DATABASE_URL` / `RGA_TEST_DATABASE_URL`
+- `.env`: `DISCORD_TOKEN` / `RGA_DATABASE_URL` / `RGA_TEST_DATABASE_URL` /
+  `RGA_JEV_API_KEY` / `RGA_TODO_BASE_URL` / `RGA_TODO_LIST_TOKEN`
 - `.setting`: 上記以外のすべて
 
 どちらかのファイルが無くても起動できます（無い設定は省略値のみで動作し、必須項目
@@ -73,6 +74,9 @@ Botを再起動してください。
 | `RGA_JEV_CONFIDENCE_THRESHOLD` | | `0.7` | この確信度未満のJev判定は「要人確認」として表示します。 |
 | `RGA_JEV_HISTORY_LIMIT` | | `50` | Jevに渡すチャンネル履歴の最大件数。 |
 | `RGA_JEV_EVALUATION_COOLDOWN_SECONDS` | | `600` | 同じチケットのJev再評価までの最短間隔（秒、クレジット節約用）。 |
+| `RGA_TODO_BASE_URL` | △ | 空 | トドTODOのAPIのBase URL。`RGA_TODO_LIST_TOKEN` と**両方**設定すると連携が有効になります。秘密情報を含むため `.env` に記載します。 |
+| `RGA_TODO_LIST_TOKEN` | △ | 空 | トドTODOのリストトークン（認可に使用）。ソース・ログ・チャットに出力しないこと。 |
+| `RGA_TODO_ROLE_IDS` | | 空 | `/todo decide` を実行できるロールID（カンマ区切り）。空の場合は管理者のみ。 |
 
 旧設定 `RGA_TICKET_CATEGORY_ID`（単一カテゴリ）と `RGA_REMINDER_DAYS` も
 引き続き利用できます。
@@ -214,6 +218,7 @@ python -m tools.retry --list     # 失敗状態を一覧表示
 | `/rga help` | Botの機能とコマンドの説明を表示します。 | 全利用者 |
 | `/rga failures` | 送信に失敗したチケットリマインダーを一覧表示します。 | `RGA_LECTURE_ROLE_IDS` のロール保持者または管理者 |
 | `/rga retry` | 失敗した送信を再試行対象に戻します。 | 同上 |
+| `/todo decide` | チケットのTODOを決着させます（承認／却下を選択）。 | `RGA_TODO_ROLE_IDS` のロール保持者または管理者 |
 
 `RGA_LECTURE_ROLE_IDS` が空の場合、`create` / `edit` / `cancel` は管理者のみ
 実行できます。
@@ -237,6 +242,30 @@ python -m tools.retry --list     # 失敗状態を一覧表示
   不在など再試行しても成功しない失敗は期限切れにし、ログへ記録します。
 - 変更時は投稿済みの案内メッセージ（送信済みリマインダーを含む）を編集し、
   変更通知を投稿先へ送信します。中止時は中止表示に更新し、中止通知を投稿します。
+
+## トドTODO連携
+
+運営が構築した共有TODOアプリ「トドTODO」と連携します。有効にするには `.env` に
+`RGA_TODO_BASE_URL` と `RGA_TODO_LIST_TOKEN` を**両方**設定します（片方だけの設定は
+起動時エラーになります）。Botはリスト内に `RGA Assistant` という名前で参加し、
+TODO操作の履歴にはBotが操作者として記録されます。
+
+- **TODO自動登録**: 監視カテゴリのチケットに申請画像（MIME `image/*` の添付ファイル）
+  が投稿されると、チケットごとに初回のみTODOを自動登録します。タイトルはチャンネル名、
+  説明にはチケットURLを記載します。登録は60秒間隔のループで再試行され、
+  `RGA_RETRY_MAX_ATTEMPTS` 回失敗すると `error` で停止し、運営用チャンネルへ
+  失敗を通知します。
+- **API障害時の再試行**: APIが5xxを返した場合や通信エラーの場合は、
+  指数バックオフで最大3回再試行します。
+- **決着コマンド**: チケットチャンネル内で `/todo decide` を実行すると、
+  TODOを `status=done` に更新し、承認・却下の別、判断人数（判断した人数の合計）、
+  実行者をメモに追記します。同じコマンドを複数回実行した場合も判断人数に加算されます
+  （同じ人が実行した場合は1人として数えます）。
+- `doing`（判断中）はBotが操作しません。モデレータがトドTODO側で手動運用します。
+
+トドTODOのAPIトークンは秘密情報のため `.env` で管理し、ソース・ログ・チャットには
+出力しません。Botはリスト削除・メンバー削除・TODO削除など、危険なエンドポイントを
+呼び出しません。
 
 ## 通知先チャンネルの設定
 
