@@ -377,7 +377,8 @@ def build_help_embed(cancel_trigger: str) -> discord.Embed:
         name="トドTODO連携",
         value=(
             "`/todo decide` チケットのTODOを決着させます（承認／却下を選択、"
-            "運営のみ）。\n"
+            "決着用チャンネルから実行、運営のみ）。決着する申請は"
+            "チケットチャンネルで選択します。\n"
             "申請画像を検知すると、トドTODOへTODOを自動登録します。"
         ),
         inline=False,
