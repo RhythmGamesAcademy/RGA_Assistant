@@ -13,6 +13,7 @@ from main import (
     build_operations_reminder_embed,
     build_ticket_reminder_embed,
     elapsed_days,
+    resolve_application_notify_channel,
 )
 
 OPENED_AT = datetime(2026, 10, 1, 15, 0, tzinfo=timezone(timedelta(hours=9)))
@@ -29,6 +30,7 @@ def make_config(**overrides) -> Config:
         reminder_targets=("ticket",),
         retention_days=90,
         operations_channel_id=555,
+        application_notify_channels=(),
         operations_mention_role_id=None,
         operations_mention_user_id=None,
         retry_base_seconds=60.0,
@@ -81,6 +83,34 @@ class ElapsedDaysTests(unittest.TestCase):
     def test_matches_full_interval(self) -> None:
         now = OPENED_AT.astimezone(timezone.utc) + timedelta(days=14)
         self.assertEqual(elapsed_days(OPENED_AT, now), 14)
+
+
+class ApplicationNotifyChannelTests(unittest.TestCase):
+    def test_mapped_category_notifies_its_own_channel(self) -> None:
+        self.assertEqual(
+            resolve_application_notify_channel(
+                10, ((10, 777), (20, 888)), 555
+            ),
+            777,
+        )
+
+    def test_unmapped_category_falls_back_to_the_default(self) -> None:
+        self.assertEqual(
+            resolve_application_notify_channel(
+                20, ((10, 777),), 555
+            ),
+            555,
+        )
+
+    def test_without_mappings_everything_uses_the_default(self) -> None:
+        self.assertEqual(
+            resolve_application_notify_channel(10, (), 555), 555
+        )
+
+    def test_none_category_uses_the_default(self) -> None:
+        self.assertEqual(
+            resolve_application_notify_channel(None, ((10, 777),), 555), 555
+        )
 
 
 class MentionBuilderTests(unittest.TestCase):
