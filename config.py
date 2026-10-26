@@ -166,6 +166,26 @@ def parse_application_status_mode(value: str) -> str:
     return normalized
 
 
+def parse_todo_endpoint_settings(
+    base_url: str | None,
+    list_token: str | None,
+) -> tuple[str | None, str | None]:
+    """Validate the TodoTodo endpoint settings as a set.
+
+    Both values live in ``.env`` and enable the integration together; a
+    half-configured state would silently break TODO registration, so it is
+    rejected instead.
+    """
+    base_url = (base_url or "").strip() or None
+    list_token = (list_token or "").strip() or None
+    if (base_url is None) != (list_token is None):
+        raise ValueError(
+            "RGA_TODO_BASE_URL and RGA_TODO_LIST_TOKEN must be set together "
+            "(both in .env) to enable the TodoTodo integration."
+        )
+    return base_url, list_token
+
+
 @dataclass(frozen=True)
 class Config:
     discord_token: str
@@ -192,6 +212,9 @@ class Config:
     jev_confidence_threshold: float
     jev_history_limit: int
     jev_evaluation_cooldown_seconds: float
+    todo_base_url: str | None
+    todo_list_token: str | None
+    todo_role_ids: tuple[int, ...]
 
 
 def load_config() -> Config:
@@ -328,6 +351,15 @@ def load_config() -> Config:
         os.getenv("RGA_JEV_EVALUATION_COOLDOWN_SECONDS", "600"),
         "RGA_JEV_EVALUATION_COOLDOWN_SECONDS",
     )
+    todo_base_url, todo_list_token = parse_todo_endpoint_settings(
+        os.getenv("RGA_TODO_BASE_URL"),
+        os.getenv("RGA_TODO_LIST_TOKEN"),
+    )
+    todo_role_ids = parse_discord_ids(
+        os.getenv("RGA_TODO_ROLE_IDS", ""),
+        "RGA_TODO_ROLE_IDS",
+        allow_empty=True,
+    )
     return Config(
         discord_token=token,
         ticket_category_ids=category_ids,
@@ -353,4 +385,7 @@ def load_config() -> Config:
         jev_confidence_threshold=jev_confidence_threshold,
         jev_history_limit=jev_history_limit,
         jev_evaluation_cooldown_seconds=jev_evaluation_cooldown_seconds,
+        todo_base_url=todo_base_url,
+        todo_list_token=todo_list_token,
+        todo_role_ids=todo_role_ids,
     )

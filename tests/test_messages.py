@@ -44,6 +44,9 @@ def make_config(**overrides) -> Config:
         jev_confidence_threshold=0.7,
         jev_history_limit=50,
         jev_evaluation_cooldown_seconds=600.0,
+        todo_base_url=None,
+        todo_list_token=None,
+        todo_role_ids=(),
     )
     settings.update(overrides)
     return Config(**settings)
