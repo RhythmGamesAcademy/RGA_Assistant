@@ -1,6 +1,7 @@
 import os
+import re
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import time, timedelta
 
 from dotenv import load_dotenv
 
@@ -58,6 +59,16 @@ def parse_optional_id(value: str, setting_name: str) -> int | None:
     if parsed <= 0:
         raise ValueError(f"{setting_name} must be a positive Discord ID.")
     return parsed
+
+
+def parse_remind_time(value: str, setting_name: str) -> time:
+    """Parse a ``HH:MM`` local (JST) time, e.g. the daily reminder send time."""
+    if not re.fullmatch(r"\d{2}:\d{2}", value.strip()):
+        raise ValueError(f"{setting_name} must be a HH:MM time.")
+    hour, minute = value.strip().split(":")
+    if not (0 <= int(hour) <= 23 and 0 <= int(minute) <= 59):
+        raise ValueError(f"{setting_name} must be a valid HH:MM time.")
+    return time(int(hour), int(minute))
 
 
 def parse_positive_float(value: str, setting_name: str) -> float:
@@ -252,6 +263,8 @@ class Config:
     todo_role_ids: tuple[int, ...]
     todo_excluded_user_ids: tuple[int, ...]
     todo_decide_channels: tuple[tuple[int, int], ...]
+    todo_remind_channel_id: int | None
+    todo_remind_time: time
 
 
 def load_config() -> Config:
@@ -410,6 +423,14 @@ def load_config() -> Config:
         os.getenv("RGA_TODO_DECIDE_CHANNELS", ""),
         "RGA_TODO_DECIDE_CHANNELS",
     )
+    todo_remind_channel_id = parse_optional_id(
+        os.getenv("RGA_TODO_REMIND_CHANNEL_ID", ""),
+        "RGA_TODO_REMIND_CHANNEL_ID",
+    )
+    todo_remind_time = parse_remind_time(
+        os.getenv("RGA_TODO_REMIND_TIME", "19:00"),
+        "RGA_TODO_REMIND_TIME",
+    )
     return Config(
         discord_token=token,
         ticket_category_ids=category_ids,
@@ -441,4 +462,6 @@ def load_config() -> Config:
         todo_role_ids=todo_role_ids,
         todo_excluded_user_ids=todo_excluded_user_ids,
         todo_decide_channels=todo_decide_channels,
+        todo_remind_channel_id=todo_remind_channel_id,
+        todo_remind_time=todo_remind_time,
     )

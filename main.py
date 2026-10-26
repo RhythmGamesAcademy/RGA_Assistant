@@ -36,6 +36,7 @@ from lecture import LectureCommands, LectureScheduler, has_lecture_permission
 from todotodo import (
     TodoCommands,
     TodoRegistrationScheduler,
+    TodoReminderScheduler,
     TodoTodoClient,
 )
 
@@ -513,6 +514,7 @@ class RGAAssistant(discord.Client):
         self.todo_client: TodoTodoClient | None = None
         self.todo_database: TodoDatabase | None = None
         self.todo_scheduler: TodoRegistrationScheduler | None = None
+        self.todo_reminder: TodoReminderScheduler | None = None
 
     async def setup_hook(self) -> None:
         assert self.pool is None
@@ -553,6 +555,10 @@ class RGAAssistant(discord.Client):
                 self, self.config, self.todo_database, self.todo_client
             )
             self.todo_scheduler.start()
+            self.todo_reminder = TodoReminderScheduler(
+                self, self.todo_client, self.config, self.todo_database
+            )
+            self.todo_reminder.start()
         self.tree.add_command(
             TodoCommands(self.config, self.todo_database, self.todo_client)
         )

@@ -82,6 +82,8 @@ Botを再起動してください。
 | `RGA_TODO_ROLE_IDS` | | 空 | `/todo decide` を実行できるロールID（カンマ区切り）。空の場合は管理者のみ。設定している場合はロール保持者の過半数（繰り上げ）の同意でTODOが決着します。 |
 | `RGA_TODO_EXCLUDED_USER_IDS` | | 空 | `/todo decide` を実行できないユーザーID（カンマ区切り）。しきい値の分母からも除外されます。 |
 | `RGA_TODO_DECIDE_CHANNELS` | | 空 | `/todo decide` を実行できる決着用チャンネルの設定。`カテゴリID:チャンネルID` をカンマ区切りで指定します（例: `111:222,333:444`）。未設定の場合 `/todo decide` はどこでも実行できません。 |
+| `RGA_TODO_REMIND_CHANNEL_ID` | | 空 | トドTODOの期限リマインドを送るチャンネルID。未設定の場合リマインドは送られません。 |
+| `RGA_TODO_REMIND_TIME` | | `19:00` | トドTODOの期限リマインドを毎日送る時刻（JST・`HH:MM`）。 |
 
 旧設定 `RGA_TICKET_CATEGORY_ID`（単一カテゴリ）と `RGA_REMINDER_DAYS` も
 引き続き利用できます。
@@ -284,6 +286,17 @@ TODO操作の履歴にはBotが操作者として記録されます。
     新しい判断として上書きされ、変更内容がメモに追記されます。
     決着済みのTODOへの判断はメモ追記のみ行われます。
 - `doing`（判断中）はBotが操作しません。モデレータがトドTODO側で手動運用します。
+- **期限リマインド**: `RGA_TODO_REMIND_CHANNEL_ID` を設定すると、毎日
+  `RGA_TODO_REMIND_TIME`（JST・既定19:00）に、期限の1日前の未決着TODOと
+  期限切れの未決着TODOをまとめて1件通知します。通知は `@silent` 相当
+  （通知音なし）で、`RGA_OPERATIONS_MENTION_ROLE_ID` / `RGA_OPERATIONS_MENTION_USER_ID`
+  のメンション設定に従います。対象はトドTODO側の `deadline` が設定された
+  未決着TODOです。決着（done）したTODOは対象外になります。
+- **新規TODOの通知**: 同じチャンネルに、トドTODO側で新しく作られたTODOを
+  60秒ごとのポーリングで検知して通知します（同じく `@silent` 相当）。
+  Bot自身が自動登録した申請チケットのTODOは除外します。検知済みのTODOは
+  PostgreSQL に記録されるため、再起動でも重複しません。導入直後の最初の
+  チェックでは既存TODOをすべて検知済みとして登録し、通知しません。
 
 トドTODOのAPIトークンは秘密情報のため `.env` で管理し、ソース・ログ・チャットには
 出力しません。Botはリスト削除・メンバー削除・TODO削除など、危険なエンドポイントを

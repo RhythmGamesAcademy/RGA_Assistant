@@ -377,6 +377,22 @@ class TodoDatabaseTests(unittest.IsolatedAsyncioTestCase):
         row = await todo.get_todo("10")
         self.assertIs(row["decided"], True)
 
+    async def test_claim_new_todos_returns_only_unseen_ids(self) -> None:
+        reminders = ReminderDatabase(self.pool, reminder_after=timedelta(days=14))
+        await self.register_ticket(reminders)
+        todo = self.make_database()
+        await todo.register_todo(10)
+
+        # Bootstrap: the seen table is empty; seeding happens silently.
+        self.assertEqual(await todo.seen_todo_count(), 0)
+        await todo.claim_new_todos(["a", "b"])
+        self.assertEqual(await todo.seen_todo_count(), 2)
+
+        self.assertEqual(await todo.claim_new_todos(["a", "c"]), ["c"])
+        self.assertEqual(await todo.claim_new_todos(["a", "b", "c"]), [])
+        self.assertEqual(await todo.claim_new_todos([]), [])
+        self.assertEqual(await todo.seen_todo_count(), 3)
+
 
 if __name__ == "__main__":
     unittest.main()
