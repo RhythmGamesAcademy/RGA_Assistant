@@ -251,6 +251,7 @@ class Config:
     todo_list_token: str | None
     todo_role_ids: tuple[int, ...]
     todo_excluded_user_ids: tuple[int, ...]
+    todo_decide_channels: tuple[tuple[int, int], ...]
 
 
 def load_config() -> Config:
@@ -405,6 +406,10 @@ def load_config() -> Config:
         "RGA_TODO_EXCLUDED_USER_IDS",
         allow_empty=True,
     )
+    todo_decide_channels = parse_channel_mappings(
+        os.getenv("RGA_TODO_DECIDE_CHANNELS", ""),
+        "RGA_TODO_DECIDE_CHANNELS",
+    )
     return Config(
         discord_token=token,
         ticket_category_ids=category_ids,
@@ -435,4 +440,5 @@ def load_config() -> Config:
         todo_list_token=todo_list_token,
         todo_role_ids=todo_role_ids,
         todo_excluded_user_ids=todo_excluded_user_ids,
+        todo_decide_channels=todo_decide_channels,
     )

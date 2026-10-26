@@ -104,6 +104,16 @@ def decide_threshold(holders: int) -> int:
     return (holders + 1) // 2
 
 
+def find_decide_channel(
+    ticket_category_id: int | None,
+    decide_channels: tuple[tuple[int, int], ...],
+) -> int | None:
+    """Return the decide channel mapped for the ticket's category, if any."""
+    if ticket_category_id is None:
+        return None
+    return dict(decide_channels).get(ticket_category_id)
+
+
 def build_todo_title(channel_name: str) -> str:
     """Build the TodoTodo title from the ticket channel name."""
     return truncate(channel_name, TODO_MAX_TITLE_LENGTH)
@@ -332,11 +342,46 @@ class TodoCommands(app_commands.Group):
         )
         return False
 
+    def _decide_channel_error(
+        self,
+        interaction: discord.Interaction,
+        ticket: discord.TextChannel,
+    ) -> str | None:
+        """Return the error message when the decide channel is wrong.
+
+        ``/todo decide`` runs only from the per-category channel configured in
+        ``RGA_TODO_DECIDE_CHANNELS``, never inside the ticket itself, so
+        concurrent applications stay isolated.
+        """
+        if not self.config.todo_decide_channels:
+            return (
+                "`/todo decide` 用のチャンネルが設定されていません。"
+                "`.setting` の `RGA_TODO_DECIDE_CHANNELS` を設定してください。"
+            )
+        decide_channel_id = find_decide_channel(
+            ticket.category_id, self.config.todo_decide_channels
+        )
+        if decide_channel_id is None:
+            return (
+                "このチケットのカテゴリには `/todo decide` 用のチャンネルが"
+                "設定されていません。設定を確認してください。"
+            )
+        if decide_channel_id != interaction.channel_id:
+            return (
+                f"このチケットの決着は <#{decide_channel_id}> で行ってください。"
+            )
+        if decide_channel_id == ticket.id:
+            return "チケットチャンネルと決着用チャンネルが同じです。設定を確認してください。"
+        return None
+
     @app_commands.command(
         name="decide",
         description="チケットのTODOを決着させます（statusをdoneに更新し、メモを追記します）。",
     )
-    @app_commands.describe(decision="決着の種類（承認／却下）")
+    @app_commands.describe(
+        decision="決着の種類（承認／却下）",
+        ticket="決着する申請のチケットチャンネル",
+    )
     @app_commands.choices(
         decision=[
             app_commands.Choice(name="承認", value=DECISION_APPROVAL),
@@ -347,6 +392,7 @@ class TodoCommands(app_commands.Group):
         self,
         interaction: discord.Interaction,
         decision: app_commands.Choice[str],
+        ticket: discord.TextChannel,
     ) -> None:
         if not await self._ensure_permission(interaction):
             return
@@ -360,8 +406,15 @@ class TodoCommands(app_commands.Group):
                 ephemeral=True,
             )
             return
+        decide_error = self._decide_channel_error(interaction, ticket)
+        if decide_error is not None:
+            await interaction.response.send_message(
+                embed=error_embed(decide_error),
+                ephemeral=True,
+            )
+            return
 
-        channel_id = str(interaction.channel_id)
+        channel_id = str(ticket.id)
         try:
             row = await self.database.get_todo(channel_id)
         except psycopg.Error:
@@ -372,11 +425,15 @@ class TodoCommands(app_commands.Group):
             )
             return
         if row is None or not row.get("todo_id"):
+            embed = error_embed(
+                "指定されたチケットにはトドTODOのTODOが登録されていないか、"
+                "登録処理が完了していません。"
+            )
+            embed.add_field(
+                name="チケット", value=f"<#{ticket.id}>", inline=True
+            )
             await interaction.response.send_message(
-                embed=error_embed(
-                    "このチケットにはトドTODOのTODOが登録されていないか、"
-                    "登録処理が完了していません。"
-                ),
+                embed=embed,
                 ephemeral=True,
             )
             return
@@ -396,12 +453,16 @@ class TodoCommands(app_commands.Group):
 
         if previous == decision.value:
             # Same decision recorded again: nothing changes on the TodoTodo side.
+            embed = discord.Embed(
+                title="もう判定しました",
+                description=f"{label}はすでに記録されています。",
+                color=COLOR_INFO,
+            )
+            embed.add_field(
+                name="チケット", value=f"<#{ticket.id}>", inline=True
+            )
             await interaction.response.send_message(
-                embed=discord.Embed(
-                    title="もう判定しました",
-                    description=f"{label}はすでに記録されています。",
-                    color=COLOR_INFO,
-                ),
+                embed=embed,
                 ephemeral=True,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
@@ -481,6 +542,9 @@ class TodoCommands(app_commands.Group):
         else:
             progress = f"判断人数: {judge_count}名"
         embed = success_embed(title, f"{description}\n{progress}")
+        embed.add_field(
+            name="チケット", value=f"<#{ticket.id}>", inline=True
+        )
         embed.add_field(
             name="TODOステータス",
             value="done" if (settle or already_decided) else "todo",
