@@ -68,7 +68,7 @@ class HelpEmbedTests(unittest.TestCase):
     def test_keyword_mode_help_describes_keyword_cancellation(self) -> None:
         text = embed_text(build_help_embed("keyword"))
         self.assertIn("キャンセル用のキーワードに完全一致する投稿があると", text)
-        self.assertNotIn("画像", text)
+        self.assertNotIn("画像が添付された投稿があると", text)
 
 
 if __name__ == "__main__":

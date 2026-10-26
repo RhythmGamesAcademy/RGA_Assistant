@@ -12,6 +12,7 @@ from config import Config, load_config
 from database import (
     LectureDatabase,
     ReminderDatabase,
+    TodoDatabase,
     ensure_compatible_event_loop_policy,
     open_pool,
 )
@@ -32,6 +33,11 @@ from jev import (
     evaluate_application_status,
 )
 from lecture import LectureCommands, LectureScheduler, has_lecture_permission
+from todotodo import (
+    TodoCommands,
+    TodoRegistrationScheduler,
+    TodoTodoClient,
+)
 
 JST = timezone(timedelta(hours=9), name="JST")
 logger = logging.getLogger("rga_assistant")
@@ -352,6 +358,15 @@ def build_help_embed(cancel_trigger: str) -> discord.Embed:
         inline=False,
     )
     embed.add_field(
+        name="トドTODO連携",
+        value=(
+            "`/todo decide` チケットのTODOを決着させます（承認／却下を選択、"
+            "運営のみ）。\n"
+            "申請画像を検知すると、トドTODOへTODOを自動登録します。"
+        ),
+        inline=False,
+    )
+    embed.add_field(
         name="その他",
         value="`/rga help` このヘルプを表示します。",
         inline=False,
@@ -475,6 +490,10 @@ class RGAAssistant(discord.Client):
         self.tree = app_commands.CommandTree(self)
         self.lecture_scheduler: LectureScheduler | None = None
         self.jev_session: aiohttp.ClientSession | None = None
+        self.todo_session: aiohttp.ClientSession | None = None
+        self.todo_client: TodoTodoClient | None = None
+        self.todo_database: TodoDatabase | None = None
+        self.todo_scheduler: TodoRegistrationScheduler | None = None
 
     async def setup_hook(self) -> None:
         assert self.pool is None
@@ -497,6 +516,27 @@ class RGAAssistant(discord.Client):
         )
         self.tree.add_command(LectureCommands(self.config, self.lecture_database))
         self.tree.add_command(RGACommands(self.config, self.database))
+        if self.config.todo_base_url and self.config.todo_list_token:
+            self.todo_session = aiohttp.ClientSession()
+            self.todo_client = TodoTodoClient(
+                self.todo_session,
+                self.config.todo_base_url,
+                self.config.todo_list_token,
+            )
+            self.todo_database = TodoDatabase(
+                self.pool,
+                retry_base_seconds=self.config.retry_base_seconds,
+                retry_max_seconds=self.config.retry_max_seconds,
+                retry_max_attempts=self.config.retry_max_attempts,
+            )
+            await self.todo_database.initialize()
+            self.todo_scheduler = TodoRegistrationScheduler(
+                self, self.config, self.todo_database, self.todo_client
+            )
+            self.todo_scheduler.start()
+        self.tree.add_command(
+            TodoCommands(self.config, self.todo_database, self.todo_client)
+        )
         self.reminder_loop.start()
         self.lecture_scheduler.start()
         try:
@@ -510,6 +550,9 @@ class RGAAssistant(discord.Client):
         if self.jev_session is not None:
             await self.jev_session.close()
             self.jev_session = None
+        if self.todo_session is not None:
+            await self.todo_session.close()
+            self.todo_session = None
         if self.pool is not None:
             await self.pool.close()
             self.pool = None
@@ -533,6 +576,11 @@ class RGAAssistant(discord.Client):
             self.config.lecture_announce_channel_id,
             self.config.lecture_reminder_minutes,
             self.config.lecture_role_ids,
+        )
+        logger.info(
+            "TodoTodo integration: %s; decide roles=%s",
+            "enabled" if self.todo_client is not None else "disabled",
+            self.config.todo_role_ids,
         )
         scanned = 0
         for guild in self.guilds:
@@ -780,6 +828,8 @@ class RGAAssistant(discord.Client):
         if not claimed:
             return
 
+        await self._register_ticket_todo(message.channel)
+
         try:
             channel = await self.fetch_channel(operations_channel_id)
             if not isinstance(channel, discord.TextChannel):
@@ -830,6 +880,25 @@ class RGAAssistant(discord.Client):
             "Notified operations about application image in ticket %s",
             message.channel.id,
         )
+
+    async def _register_ticket_todo(self, channel: discord.TextChannel) -> None:
+        """Register the TodoTodo item once per ticket (Phase 5 hook).
+
+        Failures here must never break the application image notification.
+        """
+        if self.todo_scheduler is None:
+            return
+        try:
+            await self.todo_scheduler.register_channel(channel)
+        except psycopg.Error:
+            logger.exception(
+                "Failed to register TodoTodo item for ticket %s", channel.id
+            )
+        except Exception:
+            logger.exception(
+                "Unexpected error while registering TodoTodo item for ticket %s",
+                channel.id,
+            )
 
     def _is_monitored_ticket_channel(self, channel: discord.TextChannel) -> bool:
         return is_monitored_channel(
