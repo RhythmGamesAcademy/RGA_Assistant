@@ -19,6 +19,7 @@ from todotodo import (
     build_todo_registration_failure_embed,
     count_todo_holders,
     decide_threshold,
+    find_decide_channel,
     has_todo_permission,
 )
 
@@ -95,6 +96,14 @@ class TodoThresholdTests(unittest.TestCase):
 
     def test_no_required_roles_counts_nobody(self) -> None:
         self.assertEqual(count_todo_holders([(1, {10})], ()), 0)
+
+    def test_find_decide_channel_maps_by_category(self) -> None:
+        self.assertEqual(
+            find_decide_channel(10, ((10, 777), (20, 888))), 777
+        )
+        self.assertIsNone(find_decide_channel(30, ((10, 777),)))
+        self.assertIsNone(find_decide_channel(None, ((10, 777),)))
+        self.assertIsNone(find_decide_channel(10, ()))
 
 
 class TodoTextBuildersTests(unittest.TestCase):
