@@ -49,6 +49,7 @@ def make_config(**overrides) -> Config:
         todo_base_url=None,
         todo_list_token=None,
         todo_role_ids=(),
+        todo_excluded_user_ids=(),
     )
     settings.update(overrides)
     return Config(**settings)
