@@ -192,15 +192,18 @@ fail if run from another directory.
   counts distinct judges. **The list token is in every API URL — never log
   URLs or raw aiohttp exception messages.**
 - TodoTodo deadline reminder (`TodoReminderScheduler`, 60s loop): when
-  `RGA_TODO_REMIND_CHANNEL_ID` is set, once a day at `RGA_TODO_REMIND_TIME`
-  (JST) it GETs the list (`TodoTodoClient.list_todos`), filters with
-  `collect_deadline_reminders` (unfinished todos whose `deadline` JST date is
-  tomorrow = 期限前日, or past = 期限切れ with day count), and posts one
-  silent digest (`send(..., silent=True)`) with the operations mention
-  (`build_ops_mention`, role preferred) to the channel. Empty result posts
-  nothing. The last-sent date is in-memory only: a restart after the send
-  time can repost the digest once. Fetch failures retry next minute; a
-  Discord send failure is not retried that day.
+  `RGA_TODO_REMIND_CHANNEL_ID` is set, each tick GETs the list
+  (`TodoTodoClient.list_todos`) and (1) once a day at `RGA_TODO_REMIND_TIME`
+  (JST) posts the deadline digest via `collect_deadline_reminders`
+  (unfinished todos whose `deadline` JST date is tomorrow = 期限前日, or
+  past = 期限切れ with day count), and (2) announces todos newly created on
+  the TodoTodo side (silent, `build_new_todo_embed`). Bot-created items are
+  excluded via the assistant member id (`userId`/`assigneeId`); seen ids are
+  persisted in `todo_seen_todos` (`TodoDatabase.claim_new_todos` /
+  `seen_todo_count`; the first run on an empty table seeds everything
+  silently — never notify on bootstrap). The digest's last-sent date is
+  in-memory only: a restart after the send time can repost the digest once.
+  Fetch failures retry next minute; a Discord send failure is not retried.
 - Commands are global-synced in `setup_hook`; invites need the
   `applications.commands` scope.
 - psycopg's async connections refuse Windows' default `ProactorEventLoop`. Call
