@@ -359,9 +359,14 @@ class TodoDatabaseTests(unittest.IsolatedAsyncioTestCase):
         await todo.register_todo(10)
         await todo.mark_todo_registered("10", "todo-uuid-1")
 
+        self.assertEqual(await todo.get_decision("10", 1), (None, 0))
+
         self.assertEqual(await todo.record_decision("10", 1, "approval"), 1)
+        self.assertEqual(await todo.get_decision("10", 1), ("approval", 1))
         self.assertEqual(await todo.record_decision("10", 1, "reject"), 1)
+        self.assertEqual(await todo.get_decision("10", 1), ("reject", 1))
         self.assertEqual(await todo.record_decision("10", 2, "approval"), 2)
+        self.assertEqual(await todo.get_decision("10", 2), ("approval", 2))
 
         await todo.mark_todo_decided("10")
         row = await todo.get_todo("10")
