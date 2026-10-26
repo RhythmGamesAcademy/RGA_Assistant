@@ -1159,6 +1159,17 @@ class TodoDatabase:
             row = await cursor.fetchone()
             return int(row["count"])
 
-    @staticmethod
-    def _now() -> datetime:
-        return datetime.now(timezone.utc)
+    async def decision_tallies(self, channel_id: str) -> dict[str, int]:
+        """Return per-decision vote counts (approval/reject) for the channel."""
+        async with self.pool.connection() as connection:
+            cursor = await connection.execute(
+                """
+                SELECT decision, count(*) AS count
+                FROM ticket_todo_decisions
+                WHERE channel_id = %s
+                GROUP BY decision
+                """,
+                (str(channel_id),),
+            )
+            rows = await cursor.fetchall()
+            return {row["decision"]: int(row["count"]) for row in rows}
