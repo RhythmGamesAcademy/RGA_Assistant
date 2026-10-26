@@ -23,6 +23,7 @@ from config import Config
 from database import TodoDatabase
 from embeds import (
     COLOR_ERROR,
+    COLOR_INFO,
     MAX_FIELD_VALUE,
     error_embed,
     success_embed,
@@ -80,15 +81,28 @@ def build_todo_description(guild_id: int | str, channel_id: int | str) -> str:
     return f"チケット: https://discord.com/channels/{guild_id}/{channel_id}"
 
 
+def _decision_label(decision: str) -> str:
+    return "承認" if decision == DECISION_APPROVAL else "却下"
+
+
 def build_decide_memo(
     decision: str,
     judge_count: int,
     executor_name: str,
     executor_id: int,
+    previous_decision: str | None = None,
 ) -> str:
-    """Build the memo appended to the TodoTodo item on a decide command."""
-    label = "承認" if decision == DECISION_APPROVAL else "却下"
-    memo = f"{label}｜判断人数: {judge_count}名｜実行者: {executor_name} (ID: {executor_id})"
+    """Build the memo appended to the TodoTodo item on a decide command.
+
+    When the executor changes their earlier decision, the memo records the
+    change (e.g. ``却下から承認に変更``) instead of a plain decision.
+    """
+    label = _decision_label(decision)
+    if previous_decision is not None and previous_decision != decision:
+        head = f"{_decision_label(previous_decision)}から{label}に変更"
+    else:
+        head = label
+    memo = f"{head}｜判断人数: {judge_count}名｜実行者: {executor_name} (ID: {executor_id})"
     return truncate(memo, TODO_MAX_MEMO_LENGTH)
 
 
@@ -325,6 +339,32 @@ class TodoCommands(app_commands.Group):
             )
             return
 
+        label = _decision_label(decision.value)
+        try:
+            previous, judge_count = await self.database.get_decision(
+                channel_id, interaction.user.id
+            )
+        except psycopg.Error:
+            logger.exception("Failed to load TODO decision for %s", channel_id)
+            await interaction.response.send_message(
+                embed=error_embed("TODO情報の取得に失敗しました。ログを確認してください。"),
+                ephemeral=True,
+            )
+            return
+
+        if previous == decision.value:
+            # Same decision recorded again: nothing changes on the TodoTodo side.
+            await interaction.response.send_message(
+                embed=discord.Embed(
+                    title="もう判定しました",
+                    description=f"{label}はすでに記録されています。",
+                    color=COLOR_INFO,
+                ),
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+
         # The API calls below include retries and can take several seconds.
         await interaction.response.defer(thinking=True)
         try:
@@ -339,6 +379,7 @@ class TodoCommands(app_commands.Group):
                 judge_count,
                 interaction.user.display_name,
                 interaction.user.id,
+                previous_decision=previous,
             )
             await self.client.add_memo(row["todo_id"], memo)
         except TodoTodoError as exc:
@@ -358,14 +399,16 @@ class TodoCommands(app_commands.Group):
             )
             return
 
-        label = "承認" if decision.value == DECISION_APPROVAL else "却下"
-        embed = success_embed(
-            f"{label}を記録しました",
-            (
-                "トドTODOのTODOを確認し、メモを追記しました。\n"
-                f"判断人数: {judge_count}名"
-            ),
-        )
+        if previous is None:
+            title = f"{label}を記録しました"
+            description = "トドTODOのTODOを決着させ、メモを追記しました。"
+        else:
+            title = "判断を変更しました"
+            description = (
+                f"{_decision_label(previous)}から{label}へ変更し、"
+                "メモを追記しました。"
+            )
+        embed = success_embed(title, f"{description}\n判断人数: {judge_count}名")
         embed.add_field(
             name="TODOステータス", value="done", inline=True
         )

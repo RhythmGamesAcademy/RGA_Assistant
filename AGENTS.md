@@ -156,8 +156,10 @@ fail if run from another directory.
   retries: 5xx and network errors get 3 attempts with 1s/2s backoff; 4xx fails
   immediately. `/todo decide` (choice 承認/却下) requires `RGA_TODO_ROLE_IDS`
   (or administrator): it PATCHes `status=done` once (guarded by the `decided`
-  flag) and appends an append-only memo (承認/却下の別・判断人数・実行者);
-  decisions are stored in `ticket_todo_decisions` (PK channel+user,
+  flag) and appends an append-only memo (承認/却下の別・判断人数・実行者;
+  a changed decision is recorded as 却下から承認に変更 style). Re-running
+  the same decision replies 「もう判定しました」 and touches nothing.
+  Decisions are stored in `ticket_todo_decisions` (PK channel+user,
   last-write-wins) and 判断人数 counts distinct judges. **The list token is in
   every API URL — never log URLs or raw aiohttp exception messages.**
 - Commands are global-synced in `setup_hook`; invites need the
