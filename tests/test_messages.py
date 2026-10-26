@@ -50,6 +50,7 @@ def make_config(**overrides) -> Config:
         todo_list_token=None,
         todo_role_ids=(),
         todo_excluded_user_ids=(),
+        todo_decide_channels=(),
     )
     settings.update(overrides)
     return Config(**settings)
