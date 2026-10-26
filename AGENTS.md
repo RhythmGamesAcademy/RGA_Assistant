@@ -79,6 +79,11 @@ fail if run from another directory.
   `RGA_OPERATIONS_CHANNEL_ID` (required for `operations`/`both`; also the failure
   notification target), `RGA_OPERATIONS_MENTION_ROLE_ID` or
   `RGA_OPERATIONS_MENTION_USER_ID` (mutually exclusive).
+- Application image notifications can be routed per ticket category via
+  `RGA_APPLICATION_NOTIFY_CHANNELS` (`category_id:channel_id` pairs, comma
+  separated; duplicate categories rejected; unmapped categories fall back to
+  `RGA_OPERATIONS_CHANNEL_ID`). The 14-day operations reminder and failure
+  notifications always use `RGA_OPERATIONS_CHANNEL_ID`.
 - Retry policy: `RGA_RETRY_BASE_SECONDS` (60), `RGA_RETRY_MAX_SECONDS` (21600),
   `RGA_RETRY_MAX_ATTEMPTS` (6).
 - Lectures: `RGA_LECTURE_ROLE_IDS` (comma-separated; empty = administrators only),
