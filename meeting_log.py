@@ -14,6 +14,7 @@ from typing import Any
 
 import aiohttp
 import discord
+import psycopg
 from discord import app_commands
 
 from config import Config
@@ -423,3 +424,167 @@ async def generate_meeting_log(
         build_merge_prompt(previous_summary, chunk_results), MERGE_SCHEMA
     )
     return parse_gemini_response(data, require_similar=True)
+
+
+_CHANNEL_LOCKS: dict[int, asyncio.Lock] = {}
+
+
+def build_meeting_log_command(
+    config: Config,
+    database: MeetingLogDatabase | None,
+    gemini: GeminiClient | None,
+) -> app_commands.Command:
+    async def _handle(interaction: discord.Interaction) -> None:
+        if not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message(
+                embed=error_embed("このコマンドはサーバー内でのみ実行できます。"),
+                ephemeral=True,
+            )
+            return
+        member_role_ids = {role.id for role in interaction.user.roles}
+        if not has_meeting_log_permission(
+            interaction.user.guild_permissions.administrator,
+            member_role_ids,
+            config.meeting_log_role_ids,
+        ):
+            await interaction.response.send_message(
+                embed=error_embed(
+                    "議事録を作成する権限がありません。運営に確認してください。"
+                ),
+                ephemeral=True,
+            )
+            return
+        if database is None or gemini is None:
+            await interaction.response.send_message(
+                embed=error_embed(
+                    "議事録機能が有効になっていません。"
+                    "`RGA_GEMINI_API_KEY` を設定してください。"
+                ),
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        channel = interaction.channel
+        channel_id = interaction.channel_id
+        assert channel_id is not None
+        lock = _CHANNEL_LOCKS.setdefault(channel_id, asyncio.Lock())
+        async with lock:
+            await _generate_and_post(interaction, database, gemini)
+
+    async def _generate_and_post(
+        interaction: discord.Interaction,
+        database: MeetingLogDatabase,
+        gemini: GeminiClient,
+    ) -> None:
+        guild_id = interaction.guild_id
+        channel_id = interaction.channel_id
+        channel = interaction.channel
+        assert channel_id is not None
+        now = datetime.now(timezone.utc)
+        try:
+            latest = await database.latest_log(guild_id, channel_id)
+        except psycopg.Error:
+            logger.exception("Meeting log lookup failed")
+            await interaction.followup.send(
+                embed=error_embed(
+                    "議事録の作成に失敗しました。しばらくしてからもう一度お試しください。"
+                ),
+                ephemeral=True,
+            )
+            return
+        since = compute_since(latest, now)
+        previous_summary = latest["summary"] if latest else None
+        previous_message_id = int(latest["message_id"]) if latest else None
+
+        entries: list[tuple[datetime, bool, str, str]] = []
+        async for message in channel.history(limit=COLLECTION_LIMIT, before=now):
+            if message.created_at <= since:
+                continue
+            entries.append(
+                (
+                    message.created_at,
+                    message.author.bot,
+                    message.author.display_name,
+                    message.content,
+                )
+            )
+        collected = collectable_entries(entries)
+        lines = format_messages(collected)
+        if not lines:
+            await interaction.followup.send(
+                embed=error_embed("対象となるメッセージがありません。"),
+                ephemeral=True,
+            )
+            return
+
+        try:
+            result = await generate_meeting_log(gemini, lines, previous_summary)
+        except GeminiError as exc:
+            logger.warning("Meeting log generation failed: %s", exc)
+            await interaction.followup.send(
+                embed=error_embed(
+                    "議事録の作成に失敗しました。しばらくしてからもう一度お試しください。"
+                ),
+                ephemeral=True,
+            )
+            return
+        if is_empty_extraction(result):
+            await interaction.followup.send(
+                embed=error_embed("真面目な話題が見つかりませんでした。"),
+                ephemeral=True,
+            )
+            return
+
+        newest_created_at = collected[-1][0]
+        embed = build_meeting_log_embed(
+            result,
+            since,
+            newest_created_at,
+            guild_id,
+            channel_id,
+            previous_message_id,
+        )
+        try:
+            sent = await channel.send(embed=embed)
+        except discord.HTTPException as exc:
+            logger.warning(
+                "Meeting log post failed: HTTPException status=%s", exc.status
+            )
+            await interaction.followup.send(
+                embed=error_embed("議事録の投稿に失敗しました。"),
+                ephemeral=True,
+            )
+            return
+        try:
+            await database.record(
+                guild_id,
+                channel_id,
+                sent.id,
+                build_summary_text(result),
+                newest_created_at,
+            )
+        except psycopg.Error:
+            logger.exception("Meeting log record failed")
+
+    if config.meeting_log_role_ids:
+
+        @app_commands.command(
+            name="meeting-log",
+            description="過去24時間の会話から議事録を作成します(運営用)。",
+        )
+        async def meeting_log(interaction: discord.Interaction) -> None:
+            await _handle(interaction)
+
+    else:
+
+        @app_commands.default_permissions(administrator=True)
+        @app_commands.command(
+            name="meeting-log",
+            description="過去24時間の会話から議事録を作成します(運営用)。",
+        )
+        async def meeting_log(interaction: discord.Interaction) -> None:
+            await _handle(interaction)
+
+    return meeting_log
