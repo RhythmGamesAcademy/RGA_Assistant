@@ -393,6 +393,18 @@ class TodoDatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await todo.claim_new_todos([]), [])
         self.assertEqual(await todo.seen_todo_count(), 3)
 
+    async def test_mention_toggle_defaults_off_and_persists(self) -> None:
+        reminders = ReminderDatabase(self.pool, reminder_after=timedelta(days=14))
+        await self.register_ticket(reminders)
+        todo = self.make_database()
+        await todo.register_todo(10)
+
+        self.assertIs(await todo.mention_enabled(), False)
+        await todo.set_mention_enabled(True)
+        self.assertIs(await todo.mention_enabled(), True)
+        await todo.set_mention_enabled(False)
+        self.assertIs(await todo.mention_enabled(), False)
+
 
 if __name__ == "__main__":
     unittest.main()

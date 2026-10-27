@@ -661,6 +661,58 @@ class TodoCommands(app_commands.Group):
         )
         await interaction.followup.send(embed=embed, ephemeral=True)
 
+    @app_commands.command(
+        name="mention",
+        description="TODO関連の通知（期限リマインド・新規TODO）のメンションを切り替えます。",
+    )
+    @app_commands.describe(state="メンションの有効・無効")
+    @app_commands.choices(
+        state=[
+            app_commands.Choice(name="オン（メンションあり）", value="on"),
+            app_commands.Choice(name="オフ（メンションなし）", value="off"),
+        ],
+    )
+    async def mention(
+        self,
+        interaction: discord.Interaction,
+        state: app_commands.Choice[str],
+    ) -> None:
+        if not await self._ensure_permission(interaction):
+            return
+        if self.database is None or self.client is None:
+            await interaction.response.send_message(
+                embed=error_embed(
+                    "トドTODO連携が有効になっていません。"
+                    "`RGA_TODO_BASE_URL` と `RGA_TODO_LIST_TOKEN` を "
+                    "`.env` に設定してください。"
+                ),
+                ephemeral=True,
+            )
+            return
+        enabled = state.value == "on"
+        try:
+            await self.database.set_mention_enabled(enabled)
+        except psycopg.Error:
+            logger.exception("Failed to store the mention toggle")
+            await interaction.response.send_message(
+                embed=error_embed(
+                    "設定の保存に失敗しました。ログを確認してください。"
+                ),
+                ephemeral=True,
+            )
+            return
+        if enabled:
+            embed = success_embed(
+                "メンションをオンにしました",
+                "期限リマインドと新規TODOの通知に運営メンションが付きます。",
+            )
+        else:
+            embed = success_embed(
+                "メンションをオフにしました",
+                "期限リマインドと新規TODOの通知にメンションは付きません。",
+            )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
 
 class TodoRegistrationScheduler:
     """Registers TodoTodo items for tickets with a detected application image."""
@@ -912,8 +964,19 @@ class TodoReminderScheduler:
             logger.exception("Failed to announce new TodoTodo items")
 
     async def _send_remind(self, embed: discord.Embed) -> None:
-        """Post a silent (@silent equivalent) reminder to the configured channel."""
-        mention = build_ops_mention(self.config)
+        """Post a silent (@silent equivalent) reminder to the configured channel.
+
+        The operations mention is included only when enabled via
+        ``/todo mention`` (stored in ``todo_settings``, off by default).
+        """
+        mention = None
+        try:
+            if await self.database.mention_enabled():
+                mention = build_ops_mention(self.config)
+        except psycopg.Error:
+            logger.exception(
+                "Failed to load the mention toggle; sending without mention"
+            )
         allowed_mentions = (
             discord.AllowedMentions.none()
             if mention is None
