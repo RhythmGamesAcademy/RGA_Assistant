@@ -53,6 +53,9 @@ def make_config(**overrides) -> Config:
         todo_decide_channels=(),
         todo_remind_channel_id=None,
         todo_remind_time=time(19, 0),
+        gemini_api_key=None,
+        gemini_model="gemini-2.5-flash",
+        meeting_log_role_ids=(),
     )
     settings.update(overrides)
     return Config(**settings)

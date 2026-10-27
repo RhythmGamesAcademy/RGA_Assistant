@@ -10,7 +10,7 @@ from psycopg_pool import AsyncConnectionPool
 
 logger = logging.getLogger("rga_assistant")
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 _CREATE_TICKET_REMINDERS = """
 CREATE TABLE IF NOT EXISTS ticket_reminders (
@@ -101,6 +101,23 @@ CREATE TABLE IF NOT EXISTS schema_version (
 )
 """
 
+_CREATE_MEETING_LOGS = """
+CREATE TABLE IF NOT EXISTS meeting_logs (
+    id BIGSERIAL PRIMARY KEY,
+    guild_id TEXT NOT NULL,
+    channel_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    covered_until TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+)
+"""
+
+_CREATE_MEETING_LOGS_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_meeting_logs_channel
+    ON meeting_logs (channel_id, created_at DESC)
+"""
+
 _CREATE_TICKET_TODOS = """
 CREATE TABLE IF NOT EXISTS ticket_todos (
     channel_id TEXT PRIMARY KEY
@@ -187,6 +204,8 @@ async def _create_schema(connection: Any, now: datetime) -> None:
     await connection.execute(_CREATE_TICKET_TODO_DECISIONS)
     await connection.execute(_CREATE_TODO_SEEN)
     await connection.execute(_CREATE_TODO_SETTINGS)
+    await connection.execute(_CREATE_MEETING_LOGS)
+    await connection.execute(_CREATE_MEETING_LOGS_INDEX)
     await connection.execute(_CREATE_SCHEMA_VERSION)
     await connection.execute(_UPSERT_SCHEMA_VERSION, (SCHEMA_VERSION, now))
 
@@ -1247,6 +1266,72 @@ class TodoDatabase:
                 SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at
                 """,
                 ("on" if enabled else "off", self._now()),
+            )
+
+    @staticmethod
+    def _now() -> datetime:
+        return datetime.now(timezone.utc)
+
+
+class MeetingLogDatabase:
+    """PostgreSQL access layer for ``/meeting-log`` generated summaries.
+
+    Each row records the Discord message that carried a meeting log, the
+    summary text (reused as Gemini context on the next run) and the time the
+    covered conversation window ended. Logs are meant to be kept as a record,
+    so ``tools.purge`` deletes nothing here.
+    """
+
+    def __init__(self, pool: AsyncConnectionPool) -> None:
+        self.pool = pool
+
+    async def ensure_schema(self) -> None:
+        """Create the schema without touching any stored state."""
+        async with self.pool.connection() as connection:
+            await _create_schema(connection, self._now())
+
+    async def initialize(self) -> None:
+        async with self.pool.connection() as connection:
+            await _create_schema(connection, self._now())
+
+    async def latest_log(
+        self, guild_id: int, channel_id: int
+    ) -> dict[str, Any] | None:
+        async with self.pool.connection() as connection:
+            cursor = await connection.execute(
+                """
+                SELECT * FROM meeting_logs
+                WHERE guild_id = %s AND channel_id = %s
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """,
+                (str(guild_id), str(channel_id)),
+            )
+            return await cursor.fetchone()
+
+    async def record(
+        self,
+        guild_id: int,
+        channel_id: int,
+        message_id: int,
+        summary: str,
+        covered_until: datetime,
+    ) -> None:
+        covered_until = covered_until.astimezone(timezone.utc)
+        async with self.pool.connection() as connection:
+            await connection.execute(
+                """
+                INSERT INTO meeting_logs
+                    (guild_id, channel_id, message_id, summary, covered_until)
+                VALUES (%s, %s, %s, %s, %s)
+                """,
+                (
+                    str(guild_id),
+                    str(channel_id),
+                    str(message_id),
+                    summary,
+                    covered_until,
+                ),
             )
 
     @staticmethod
