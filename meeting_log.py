@@ -573,6 +573,18 @@ def build_meeting_log_command(
             )
         except psycopg.Error:
             logger.exception("Meeting log record failed")
+        # The interaction was deferred with thinking=True but the result is
+        # posted publicly via channel.send; delete the ephemeral "thinking"
+        # response so the spinner does not linger until the interaction
+        # times out.
+        try:
+            await interaction.delete_original_response()
+        except discord.HTTPException as exc:
+            logger.warning(
+                "Failed to delete the meeting log thinking response: "
+                "HTTPException status=%s",
+                exc.status,
+            )
 
     if config.meeting_log_role_ids:
 
