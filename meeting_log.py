@@ -469,6 +469,12 @@ def build_meeting_log_command(
         channel = interaction.channel
         channel_id = interaction.channel_id
         assert channel_id is not None
+        if channel is None:
+            await interaction.followup.send(
+                embed=error_embed("実行チャンネルの履歴を取得できませんでした。"),
+                ephemeral=True,
+            )
+            return
         lock = _CHANNEL_LOCKS.setdefault(channel_id, asyncio.Lock())
         async with lock:
             await _generate_and_post(interaction, database, gemini)
