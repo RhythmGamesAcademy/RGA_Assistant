@@ -391,3 +391,35 @@ class GeminiClient:
         if not isinstance(parsed, dict):
             raise GeminiError("Gemini API returned a non-object JSON value.")
         return parsed
+
+
+async def generate_meeting_log(
+    gemini: "GeminiClient",
+    lines: list[str],
+    previous_summary: str | None,
+) -> dict[str, Any]:
+    """Generate the final meeting log payload ("similar" always present).
+
+    A single call covers inputs up to the split threshold; longer inputs run
+    one extraction call per chunk (in order) plus a final merge call. A
+    ``GeminiError`` anywhere propagates: callers discard the partial result
+    and leave no DB row or posted embed behind.
+    """
+    full_text = "\n".join(lines)
+    if len(full_text) <= CHUNK_SPLIT_THRESHOLD:
+        data = await gemini.generate_json(
+            build_single_prompt(full_text, previous_summary), MERGE_SCHEMA
+        )
+        return parse_gemini_response(data, require_similar=True)
+    chunk_results: list[dict[str, Any]] = []
+    for chunk in split_into_chunks(lines):
+        data = await gemini.generate_json(
+            build_chunk_prompt(chunk), EXTRACTION_SCHEMA
+        )
+        chunk_results.append(
+            parse_gemini_response(data, require_similar=False)
+        )
+    data = await gemini.generate_json(
+        build_merge_prompt(previous_summary, chunk_results), MERGE_SCHEMA
+    )
+    return parse_gemini_response(data, require_similar=True)

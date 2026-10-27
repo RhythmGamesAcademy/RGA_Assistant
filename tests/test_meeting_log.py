@@ -19,6 +19,7 @@ from meeting_log import (
     collectable_entries,
     compute_since,
     format_messages,
+    generate_meeting_log,
     has_meeting_log_permission,
     is_empty_extraction,
     parse_gemini_response,
@@ -270,6 +271,46 @@ class GeminiClientTests(unittest.TestCase):
         client, _ = make_gemini_client([FakeResponse(200, {"candidates": []})])
         with self.assertRaises(GeminiError):
             asyncio.run(client.generate_json("p", MERGE_SCHEMA))
+
+
+class GenerateMeetingLogTests(unittest.IsolatedAsyncioTestCase):
+    def _fake_client(self, extraction, merge):
+        calls = []
+
+        class FakeGemini:
+            async def generate_json(self, prompt, schema):
+                calls.append(prompt)
+                return merge if schema is MERGE_SCHEMA else extraction
+
+        return FakeGemini(), calls
+
+    async def test_short_input_single_call(self) -> None:
+        gemini, calls = self._fake_client(
+            {"topics": [], "decisions": [], "todos": []},
+            {"similar": False, "topics": [{"title": "t", "summary": "s"}], "decisions": [], "todos": []},
+        )
+        result = await generate_meeting_log(gemini, ["1行目"], None)
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(result["similar"])
+
+    async def test_long_input_splits_then_merges(self) -> None:
+        line = "x" * 600
+        lines = [f"{line} #{i}" for i in range(120)]
+        extraction = {"topics": [{"title": "t", "summary": "s"}], "decisions": ["d"], "todos": []}
+        merge = {"similar": True, "topics": [{"title": "t", "summary": "s"}], "decisions": ["d"], "todos": []}
+        gemini, calls = self._fake_client(extraction, merge)
+        result = await generate_meeting_log(gemini, lines, "前回")
+        self.assertEqual(len(calls), len(split_into_chunks(lines)) + 1)
+        self.assertTrue(result["similar"])
+        self.assertIn("前回", calls[-1])
+
+    async def test_failure_midway_propagates(self) -> None:
+        class FailingGemini:
+            async def generate_json(self, prompt, schema):
+                raise GeminiError("Gemini API returned HTTP 500.")
+
+        with self.assertRaises(GeminiError):
+            await generate_meeting_log(FailingGemini(), ["a" * 600] * 60, None)
 
 
 if __name__ == "__main__":
