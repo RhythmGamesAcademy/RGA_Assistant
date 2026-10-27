@@ -2,8 +2,10 @@ import os
 import tempfile
 import unittest
 from datetime import time, timedelta
+from unittest.mock import patch
 
 from config import (
+    load_config,
     load_env_files,
     parse_cancel_trigger,
     parse_category_ids,
@@ -193,6 +195,72 @@ class RemindTimeConfigTests(unittest.TestCase):
         for value in ("", "abc", "19", "19:00:30", "24:00", "19:5"):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 parse_remind_time(value, "RGA_TODO_REMIND_TIME")
+
+
+class MeetingLogRoleIdsConfigTests(unittest.TestCase):
+    def test_meeting_log_role_ids_parse_and_dedupe(self) -> None:
+        self.assertEqual(parse_discord_ids("10,20,10", "RGA_MEETING_LOG_ROLE_IDS", allow_empty=True), (10, 20))
+
+    def test_meeting_log_role_ids_allow_empty(self) -> None:
+        self.assertEqual(parse_discord_ids("", "RGA_MEETING_LOG_ROLE_IDS", allow_empty=True), ())
+
+
+MEETING_LOG_ENV_VARS = (
+    "DISCORD_TOKEN",
+    "RGA_DATABASE_URL",
+    "RGA_GEMINI_API_KEY",
+    "RGA_GEMINI_MODEL",
+    "RGA_MEETING_LOG_ROLE_IDS",
+)
+
+
+class MeetingLogLoadConfigTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._saved = {name: os.environ.get(name) for name in MEETING_LOG_ENV_VARS}
+        for name in MEETING_LOG_ENV_VARS:
+            os.environ.pop(name, None)
+
+    def tearDown(self) -> None:
+        for name, value in self._saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+    def _load(self, **values):
+        for name, value in values.items():
+            os.environ[name] = value
+        with patch.dict(
+            os.environ,
+            {"DISCORD_TOKEN": "token", "RGA_DATABASE_URL": "postgresql://u:p@localhost/db"},
+        ):
+            return load_config()
+
+    def test_gemini_api_key_unset_is_none(self) -> None:
+        self.assertIsNone(self._load().gemini_api_key)
+
+    def test_gemini_api_key_set_is_kept(self) -> None:
+        config = self._load(RGA_GEMINI_API_KEY=" gemini-key ")
+        self.assertEqual(config.gemini_api_key, "gemini-key")
+
+    def test_gemini_model_defaults_to_gemini_flash(self) -> None:
+        self.assertEqual(self._load().gemini_model, "gemini-2.5-flash")
+
+    def test_gemini_model_custom_value(self) -> None:
+        self.assertEqual(self._load(RGA_GEMINI_MODEL="gemini-2.5-pro").gemini_model, "gemini-2.5-pro")
+
+    def test_gemini_model_rejects_empty(self) -> None:
+        with self.assertRaises(ValueError):
+            self._load(RGA_GEMINI_MODEL=" ")
+
+    def test_meeting_log_role_ids_default_empty(self) -> None:
+        self.assertEqual(self._load().meeting_log_role_ids, ())
+
+    def test_meeting_log_role_ids_parsed(self) -> None:
+        self.assertEqual(
+            self._load(RGA_MEETING_LOG_ROLE_IDS="10, 20,10").meeting_log_role_ids,
+            (10, 20),
+        )
 
 
 SPLIT_ENV_VARS = ("DISCORD_TOKEN", "RGA_REMINDER_VALUE")

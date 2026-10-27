@@ -265,6 +265,9 @@ class Config:
     todo_decide_channels: tuple[tuple[int, int], ...]
     todo_remind_channel_id: int | None
     todo_remind_time: time
+    gemini_api_key: str | None
+    gemini_model: str
+    meeting_log_role_ids: tuple[int, ...]
 
 
 def load_config() -> Config:
@@ -431,6 +434,15 @@ def load_config() -> Config:
         os.getenv("RGA_TODO_REMIND_TIME", "19:00"),
         "RGA_TODO_REMIND_TIME",
     )
+    gemini_api_key = os.getenv("RGA_GEMINI_API_KEY", "").strip() or None
+    gemini_model = os.getenv("RGA_GEMINI_MODEL", "gemini-2.5-flash").strip()
+    if not gemini_model:
+        raise ValueError("RGA_GEMINI_MODEL must not be empty.")
+    meeting_log_role_ids = parse_discord_ids(
+        os.getenv("RGA_MEETING_LOG_ROLE_IDS", ""),
+        "RGA_MEETING_LOG_ROLE_IDS",
+        allow_empty=True,
+    )
     return Config(
         discord_token=token,
         ticket_category_ids=category_ids,
@@ -464,4 +476,7 @@ def load_config() -> Config:
         todo_decide_channels=todo_decide_channels,
         todo_remind_channel_id=todo_remind_channel_id,
         todo_remind_time=todo_remind_time,
+        gemini_api_key=gemini_api_key,
+        gemini_model=gemini_model,
+        meeting_log_role_ids=meeting_log_role_ids,
     )
