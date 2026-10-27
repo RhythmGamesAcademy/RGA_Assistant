@@ -1,10 +1,15 @@
+import asyncio
 import json
 import unittest
 from datetime import datetime, timedelta, timezone
 
 from embeds import MAX_DESCRIPTION
+from unittest.mock import patch
+
 from meeting_log import (
     CHUNK_TARGET_CHARS,
+    MERGE_SCHEMA,
+    GeminiClient,
     GeminiError,
     build_chunk_prompt,
     build_meeting_log_embed,
@@ -187,6 +192,84 @@ class EmbedTests(unittest.TestCase):
         result = {"similar": True, "topics": [{"title": "t", "summary": "s"}], "decisions": ["d"], "todos": []}
         text = build_summary_text(result)
         self.assertEqual(json.loads(text), result)
+
+
+class FakeResponse:
+    def __init__(self, status, payload=None):
+        self.status = status
+        self._text = json.dumps(payload) if payload is not None else ""
+
+    async def text(self):
+        return self._text
+
+
+class FakeContext:
+    def __init__(self, response):
+        self.response = response
+
+    async def __aenter__(self):
+        return self.response
+
+    async def __aexit__(self, *args):
+        return False
+
+
+class FakeSession:
+    def __init__(self, outcomes):
+        self.outcomes = list(outcomes)
+        self.requests = []
+
+    def request(self, method, url, **kwargs):
+        self.requests.append({"method": method, "url": url, **kwargs})
+        outcome = self.outcomes.pop(0) if self.outcomes else asyncio.TimeoutError()
+        if isinstance(outcome, Exception):
+            raise outcome
+        return FakeContext(outcome)
+
+
+def make_gemini_client(outcomes, api_key="gemini-key"):
+    session = FakeSession(outcomes)
+    client = GeminiClient(session, api_key)
+    return client, session
+
+
+class GeminiClientTests(unittest.TestCase):
+    def setUp(self) -> None:
+        for name in ("GEMINI_RETRY_BASE_SECONDS", "GEMINI_RETRY_MAX_SECONDS"):
+            p = patch(f"meeting_log.{name}", 0)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def _payload(self, text: str) -> dict:
+        return {"candidates": [{"content": {"parts": [{"text": text}]}}]}
+
+    def test_generate_json_returns_parsed_content(self) -> None:
+        client, session = make_gemini_client(
+            [FakeResponse(200, self._payload('{"similar": false, "topics": [], "decisions": [], "todos": []}'))]
+        )
+        result = asyncio.run(client.generate_json("p", MERGE_SCHEMA))
+        self.assertEqual(result["todos"], [])
+        self.assertIn("x-goog-api-key", session.requests[0]["headers"])
+        self.assertNotIn("key=", session.requests[0]["url"])
+        self.assertIn("responseSchema", session.requests[0]["json"]["generationConfig"])
+
+    def test_retries_5xx_then_succeeds(self) -> None:
+        client, _ = make_gemini_client(
+            [FakeResponse(500), FakeResponse(500), FakeResponse(200, self._payload('{"ok": 1}'))]
+        )
+        result = asyncio.run(client.generate_json("p", MERGE_SCHEMA))
+        self.assertEqual(result, {"ok": 1})
+
+    def test_4xx_fails_immediately(self) -> None:
+        client, session = make_gemini_client([FakeResponse(403)])
+        with self.assertRaises(GeminiError):
+            asyncio.run(client.generate_json("p", MERGE_SCHEMA))
+        self.assertEqual(len(session.requests), 1)
+
+    def test_malformed_gemini_body_raises(self) -> None:
+        client, _ = make_gemini_client([FakeResponse(200, {"candidates": []})])
+        with self.assertRaises(GeminiError):
+            asyncio.run(client.generate_json("p", MERGE_SCHEMA))
 
 
 if __name__ == "__main__":

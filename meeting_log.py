@@ -291,3 +291,103 @@ def build_meeting_log_embed(
 
 def build_summary_text(result: dict[str, Any]) -> str:
     return json.dumps(result, ensure_ascii=False)
+
+
+GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+
+# 生成に時間がかかるため Todo より長いタイムアウトを使用する。
+GEMINI_TIMEOUT_SECONDS = 60.0
+GEMINI_RETRY_ATTEMPTS = 3
+GEMINI_RETRY_BASE_SECONDS = 1.0
+GEMINI_RETRY_MAX_SECONDS = 8.0
+
+
+class GeminiClient:
+    """HTTP client for the Gemini ``generateContent`` API.
+
+    The API key travels in the ``x-goog-api-key`` header and is never
+    logged; failures surface only their HTTP status or exception class name,
+    because aiohttp exception messages can embed the request context.
+    """
+
+    def __init__(
+        self,
+        session: aiohttp.ClientSession,
+        api_key: str,
+        model: str = "gemini-2.5-flash",
+    ) -> None:
+        self._session = session
+        self._api_key = api_key
+        self._model = model
+
+    async def generate_json(
+        self, prompt: str, schema: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Run one structured-output generation and return the parsed dict."""
+        url = f"{GEMINI_BASE_URL}/models/{self._model}:generateContent"
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "responseMimeType": "application/json",
+                "responseSchema": schema,
+            },
+        }
+        last_error: GeminiError | None = None
+        for attempt in range(1, GEMINI_RETRY_ATTEMPTS + 1):
+            try:
+                async with self._session.request(
+                    "POST",
+                    url,
+                    json=payload,
+                    headers={
+                        "x-goog-api-key": self._api_key,
+                        "Content-Type": "application/json",
+                    },
+                    timeout=aiohttp.ClientTimeout(total=GEMINI_TIMEOUT_SECONDS),
+                ) as response:
+                    text = await response.text()
+                    if 200 <= response.status < 300:
+                        return self._extract_text(text)
+                    if response.status < 500:
+                        raise GeminiError(
+                            f"Gemini API returned HTTP {response.status}."
+                        )
+                    last_error = GeminiError(
+                        f"Gemini API returned HTTP {response.status}."
+                    )
+            except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
+                last_error = GeminiError(
+                    f"Gemini API communication failed: {type(exc).__name__}"
+                )
+            if attempt < GEMINI_RETRY_ATTEMPTS:
+                delay = min(
+                    GEMINI_RETRY_MAX_SECONDS,
+                    GEMINI_RETRY_BASE_SECONDS * (2 ** (attempt - 1)),
+                )
+                logger.warning(
+                    "Gemini API request failed (attempt %s/%s); retrying in %.1fs",
+                    attempt,
+                    GEMINI_RETRY_ATTEMPTS,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+        assert last_error is not None
+        raise last_error
+
+    def _extract_text(self, body: str) -> dict[str, Any]:
+        try:
+            data = json.loads(body)
+            text = data["candidates"][0]["content"]["parts"][0]["text"]
+        except (KeyError, IndexError, TypeError, ValueError) as exc:
+            raise GeminiError(
+                f"Gemini API returned an unexpected body: {type(exc).__name__}"
+            ) from exc
+        try:
+            parsed = json.loads(text)
+        except ValueError as exc:
+            raise GeminiError(
+                f"Gemini API returned invalid JSON: {type(exc).__name__}"
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise GeminiError("Gemini API returned a non-object JSON value.")
+        return parsed
