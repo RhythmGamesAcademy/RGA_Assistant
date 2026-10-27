@@ -11,6 +11,7 @@ from discord.ext import tasks
 from config import Config, load_config
 from database import (
     LectureDatabase,
+    MeetingLogDatabase,
     ReminderDatabase,
     TodoDatabase,
     ensure_compatible_event_loop_policy,
@@ -33,6 +34,7 @@ from jev import (
     evaluate_application_status,
 )
 from lecture import LectureCommands, LectureScheduler, has_lecture_permission
+from meeting_log import GeminiClient, build_meeting_log_command
 from todotodo import (
     TodoCommands,
     TodoRegistrationScheduler,
@@ -515,6 +517,9 @@ class RGAAssistant(discord.Client):
         self.todo_database: TodoDatabase | None = None
         self.todo_scheduler: TodoRegistrationScheduler | None = None
         self.todo_reminder: TodoReminderScheduler | None = None
+        self.meeting_session: aiohttp.ClientSession | None = None
+        self.meeting_client: GeminiClient | None = None
+        self.meeting_log_database: MeetingLogDatabase | None = None
 
     async def setup_hook(self) -> None:
         assert self.pool is None
@@ -562,6 +567,20 @@ class RGAAssistant(discord.Client):
         self.tree.add_command(
             TodoCommands(self.config, self.todo_database, self.todo_client)
         )
+        if self.config.gemini_api_key:
+            self.meeting_session = aiohttp.ClientSession()
+            self.meeting_client = GeminiClient(
+                self.meeting_session,
+                self.config.gemini_api_key,
+                self.config.gemini_model,
+            )
+            self.meeting_log_database = MeetingLogDatabase(self.pool)
+            await self.meeting_log_database.initialize()
+            self.tree.add_command(
+                build_meeting_log_command(
+                    self.config, self.meeting_log_database, self.meeting_client
+                )
+            )
         self.reminder_loop.start()
         self.lecture_scheduler.start()
         try:
@@ -578,6 +597,9 @@ class RGAAssistant(discord.Client):
         if self.todo_session is not None:
             await self.todo_session.close()
             self.todo_session = None
+        if self.meeting_session is not None:
+            await self.meeting_session.close()
+            self.meeting_session = None
         if self.pool is not None:
             await self.pool.close()
             self.pool = None
@@ -606,6 +628,11 @@ class RGAAssistant(discord.Client):
             "TodoTodo integration: %s; decide roles=%s",
             "enabled" if self.todo_client is not None else "disabled",
             self.config.todo_role_ids,
+        )
+        logger.info(
+            "Meeting log feature: %s; roles=%s",
+            "enabled" if self.meeting_client is not None else "disabled",
+            self.config.meeting_log_role_ids,
         )
         scanned = 0
         for guild in self.guilds:
