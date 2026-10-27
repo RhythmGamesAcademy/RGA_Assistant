@@ -204,6 +204,10 @@ fail if run from another directory.
   silently — never notify on bootstrap). The digest's last-sent date is
   in-memory only: a restart after the send time can repost the digest once.
   Fetch failures retry next minute; a Discord send failure is not retried.
+  The operations mention in both notifications is gated by
+  `TodoDatabase.mention_enabled` / `set_mention_enabled` (stored in
+  `todo_settings`, default off) toggled by `/todo mention` (same permission
+  as decide; excluded users may not run it).
 - Commands are global-synced in `setup_hook`; invites need the
   `applications.commands` scope.
 - psycopg's async connections refuse Windows' default `ProactorEventLoop`. Call

@@ -226,6 +226,7 @@ python -m tools.retry --list     # 失敗状態を一覧表示
 | `/rga failures` | 送信に失敗したチケットリマインダーを一覧表示します。 | `RGA_LECTURE_ROLE_IDS` のロール保持者または管理者 |
 | `/rga retry` | 失敗した送信を再試行対象に戻します。 | 同上 |
 | `/todo decide` | チケットのTODOを決着させます（承認／却下を選択）。決着するチケットをパラメータで指定し、`RGA_TODO_DECIDE_CHANNELS` で設定したカテゴリ別の決着用チャンネルからのみ実行できます。 | `RGA_TODO_ROLE_IDS` のロール保持者または管理者 |
+| `/todo mention` | TODO関連の通知（期限リマインド・新規TODO通知）に運営メンションを付けるかを切り替えます。既定はオフです。 | `RGA_TODO_ROLE_IDS` のロール保持者または管理者 |
 
 `RGA_LECTURE_ROLE_IDS` が空の場合、`create` / `edit` / `cancel` は管理者のみ
 実行できます。
@@ -292,6 +293,8 @@ TODO操作の履歴にはBotが操作者として記録されます。
   （通知音なし）で、`RGA_OPERATIONS_MENTION_ROLE_ID` / `RGA_OPERATIONS_MENTION_USER_ID`
   のメンション設定に従います。対象はトドTODO側の `deadline` が設定された
   未決着TODOです。決着（done）したTODOは対象外になります。
+  メンションの有無は `/todo mention`（オン／オフ）で切り替えられます
+  （既定はオフ。設定は PostgreSQL に保存され、再起動でも維持されます）。
 - **新規TODOの通知**: 同じチャンネルに、トドTODO側で新しく作られたTODOを
   60秒ごとのポーリングで検知して通知します（同じく `@silent` 相当）。
   Bot自身が自動登録した申請チケットのTODOは除外します。検知済みのTODOは
