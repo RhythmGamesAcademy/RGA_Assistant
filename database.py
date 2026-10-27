@@ -10,7 +10,7 @@ from psycopg_pool import AsyncConnectionPool
 
 logger = logging.getLogger("rga_assistant")
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 _CREATE_TICKET_REMINDERS = """
 CREATE TABLE IF NOT EXISTS ticket_reminders (
@@ -133,6 +133,14 @@ CREATE TABLE IF NOT EXISTS todo_seen_todos (
 )
 """
 
+_CREATE_TODO_SETTINGS = """
+CREATE TABLE IF NOT EXISTS todo_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL
+)
+"""
+
 _UPSERT_SCHEMA_VERSION = """
 INSERT INTO schema_version (id, version, updated_at)
 VALUES (TRUE, %s, %s)
@@ -178,6 +186,7 @@ async def _create_schema(connection: Any, now: datetime) -> None:
     await connection.execute(_CREATE_TICKET_TODOS)
     await connection.execute(_CREATE_TICKET_TODO_DECISIONS)
     await connection.execute(_CREATE_TODO_SEEN)
+    await connection.execute(_CREATE_TODO_SETTINGS)
     await connection.execute(_CREATE_SCHEMA_VERSION)
     await connection.execute(_UPSERT_SCHEMA_VERSION, (SCHEMA_VERSION, now))
 
@@ -1212,6 +1221,33 @@ class TodoDatabase:
             )
             rows = await cursor.fetchall()
             return [row["todo_id"] for row in rows]
+
+    async def mention_enabled(self) -> bool:
+        """Return whether todo reminders include the operations mention.
+
+        The default (nothing stored) is off.
+        """
+        async with self.pool.connection() as connection:
+            cursor = await connection.execute(
+                "SELECT value FROM todo_settings WHERE key = 'mention'"
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                return False
+            return row["value"] == "on"
+
+    async def set_mention_enabled(self, enabled: bool) -> None:
+        """Store the todo reminder mention toggle."""
+        async with self.pool.connection() as connection:
+            await connection.execute(
+                """
+                INSERT INTO todo_settings (key, value, updated_at)
+                VALUES ('mention', %s, %s)
+                ON CONFLICT (key) DO UPDATE
+                SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at
+                """,
+                ("on" if enabled else "off", self._now()),
+            )
 
     @staticmethod
     def _now() -> datetime:
