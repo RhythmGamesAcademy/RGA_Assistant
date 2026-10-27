@@ -16,6 +16,11 @@ app (Phase 5). Flat module project — no packages, cogs, or service layers.
   wrapper with exponential-backoff retries on 5xx; never logs the token or
   URL), `TodoCommands` (`/todo decide`), and `TodoRegistrationScheduler`
   (60s `tasks.loop` for TODO auto-registration).
+- `meeting_log.py` — Phase 6 meeting log: pure helpers (window computation,
+  collection filtering, message formatting, chunk splitting, Gemini prompt
+  building, response parsing), `GeminiClient` (aiohttp wrapper for
+  `generateContent`; API key travels in the `x-goog-api-key` header and is
+  never logged), and `build_meeting_log_command` (`/meeting-log`).
 - `embeds.py` — shared embed colors (`COLOR_*`), `truncate`, `error_embed`,
   `success_embed`. Every bot message/response is an embed; only the operations
   mention is plain `content`.
@@ -32,7 +37,8 @@ app (Phase 5). Flat module project — no packages, cogs, or service layers.
 - `deploy/rga-assistant.service` — systemd unit template.
 - `specification.md` — aspirational multi-phase spec. **Phases 2 (ticket
   reminder), 3 (lecture schedule), 4 (application image notification /
-  application status), and 5 (TodoTodo integration) are implemented.** Inquiry
+  application status), 5 (TodoTodo integration), and 6 (meeting log,
+  `/meeting-log`) are implemented.** Inquiry
   classification (the remaining Phase 4 item) does NOT exist. Don't scaffold
   it unless asked.
 
@@ -99,6 +105,12 @@ fail if run from another directory.
   disabled everywhere), `RGA_TODO_REMIND_CHANNEL_ID` (single channel for the
   daily deadline reminder; unset = reminder off), `RGA_TODO_REMIND_TIME`
   (`HH:MM` JST, default 19:00).
+- Meeting log: `RGA_GEMINI_API_KEY` (in `.env`; unset = `/meeting-log` is not
+  synced at all — the same gate as the TodoTodo integration),
+  `RGA_GEMINI_MODEL` (default `gemini-2.5-flash`), `RGA_MEETING_LOG_ROLE_IDS`
+  (comma-separated; empty = administrators only, command hidden from others
+  via `default_permissions(administrator=True)`; set = visible to all but
+  runtime role check).
 - Legacy vars still read: `RGA_TICKET_CATEGORY_ID`, `RGA_REMINDER_DAYS`.
 - Invalid config exits with a message. Discord **Message Content Intent** and
   **Server Members Intent** must be
@@ -208,6 +220,30 @@ fail if run from another directory.
   `TodoDatabase.mention_enabled` / `set_mention_enabled` (stored in
   `todo_settings`, default off) toggled by `/todo mention` (same permission
   as decide; excluded users may not run it).
+- Meeting log (`/meeting-log`, Phase 6): enabled only when `RGA_GEMINI_API_KEY`
+  is set; the command is added to the tree from a
+  `build_meeting_log_command(config, database, gemini)` factory. Window is the
+  last 24h of the channel (`now - WINDOW` when there is no log or the latest
+  log is older than 24h, `latest.covered_until` otherwise). Collection reads
+  up to 1000 messages via `channel.history(limit=1000, before=now)` and drops
+  anything at or before `since`; bots and blank messages are filtered by
+  `collectable_entries`, bodies are cut to 500 chars per line
+  (`format_messages`, no ellipsis — chunk math counts exact characters). With
+  0 collected lines it replies ephemeral and writes nothing, so the same
+  window is re-covered next run. If the joined text exceeds 25,000 chars the
+  flow splits into ~20,000-char chunks (message boundaries only) and runs one
+  extraction call per chunk plus a merge call with the previous summary; any
+  `GeminiError` aborts everything (no post, no INSERT). An all-empty
+  extraction replies 「真面目な話題が見つかりませんでした。」 without writing.
+  Successful runs post ONE public embed via `channel.send` (not followup) and
+  then `record(...)` the summary JSON into `meeting_logs` (`covered_until` =
+  newest collected message time); `psycopg.Error` on record is only logged.
+  Concurrency is serialized per channel with a module-level
+  `_CHANNEL_LOCKS: dict[int, asyncio.Lock]` (process-memory only, no DB
+  marker). The Gemini client retries 5xx/network errors 3× with 1s/2s backoff
+  and 60s timeout; 4xx fails immediately; URLs and the API key are never
+  logged — only statuses or exception class names. `meeting_logs` rows are NOT
+  purged by `tools.purge` and are not part of `tools.migrate_sqlite`.
 - Commands are global-synced in `setup_hook`; invites need the
   `applications.commands` scope.
 - psycopg's async connections refuse Windows' default `ProactorEventLoop`. Call
