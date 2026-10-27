@@ -232,8 +232,12 @@ class MeetingLogLoadConfigTests(unittest.TestCase):
             os.environ[name] = value
         with patch.dict(
             os.environ,
-            {"DISCORD_TOKEN": "token", "RGA_DATABASE_URL": "postgresql://u:p@localhost/db"},
-        ):
+            {
+                "DISCORD_TOKEN": "token",
+                "RGA_DATABASE_URL": "postgresql://u:p@localhost/db",
+                "RGA_TICKET_CATEGORY_IDS": "10",
+            },
+        ), patch("config.load_env_files"):
             return load_config()
 
     def test_gemini_api_key_unset_is_none(self) -> None:
