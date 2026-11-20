@@ -268,6 +268,7 @@ class Config:
     gemini_api_key: str | None
     gemini_model: str
     meeting_log_role_ids: tuple[int, ...]
+    meeting_log_window: timedelta = timedelta(hours=24)
 
 
 def load_config() -> Config:
@@ -443,6 +444,15 @@ def load_config() -> Config:
         "RGA_MEETING_LOG_ROLE_IDS",
         allow_empty=True,
     )
+    meeting_log_window_hours_text = os.getenv(
+        "RGA_MEETING_LOG_WINDOW_HOURS",
+        "24",
+    ).strip()
+    meeting_log_window_hours = parse_positive_int(
+        meeting_log_window_hours_text,
+        "RGA_MEETING_LOG_WINDOW_HOURS",
+    )
+    meeting_log_window = timedelta(hours=meeting_log_window_hours)
     return Config(
         discord_token=token,
         ticket_category_ids=category_ids,
@@ -479,4 +489,5 @@ def load_config() -> Config:
         gemini_api_key=gemini_api_key,
         gemini_model=gemini_model,
         meeting_log_role_ids=meeting_log_role_ids,
+        meeting_log_window=meeting_log_window,
     )

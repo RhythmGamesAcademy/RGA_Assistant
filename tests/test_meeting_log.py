@@ -48,6 +48,11 @@ class ComputeSinceTests(unittest.TestCase):
         now = datetime(2026, 10, 27, 12, 0, tzinfo=timezone.utc)
         self.assertEqual(compute_since(None, now), now - timedelta(hours=24))
 
+    def test_no_log_uses_configured_window(self) -> None:
+        now = datetime(2026, 10, 27, 12, 0, tzinfo=timezone.utc)
+        window = timedelta(hours=48)
+        self.assertEqual(compute_since(None, now, window), now - window)
+
 
 class CollectTests(unittest.TestCase):
     def test_filters_bots_and_empty_and_sorts_oldest_first(self) -> None:

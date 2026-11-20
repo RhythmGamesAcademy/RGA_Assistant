@@ -37,15 +37,19 @@ CHUNK_TARGET_CHARS = 20000
 JST = timezone(timedelta(hours=9), name="JST")
 
 
-def compute_since(latest: dict[str, Any] | None, now: datetime) -> datetime:
+def compute_since(
+    latest: dict[str, Any] | None,
+    now: datetime,
+    window: timedelta = WINDOW,
+) -> datetime:
     """Return the timestamp from which messages should be collected.
 
-    A log created within the last 24 hours narrows the window to its
-    ``covered_until``; anything older (or absent) restarts the full window.
+    A recent log narrows the window to its ``covered_until``; anything older
+    (or absent) restarts the full configured window.
     psycopg returns aware datetimes, so no conversion is needed here.
     """
-    if latest is None or now - latest["created_at"] >= WINDOW:
-        return now - WINDOW
+    if latest is None or now - latest["created_at"] >= window:
+        return now - window
     return latest["covered_until"]
 
 
@@ -500,7 +504,7 @@ def build_meeting_log_command(
                 ephemeral=True,
             )
             return
-        since = compute_since(latest, now)
+        since = compute_since(latest, now, config.meeting_log_window)
         previous_summary = latest["summary"] if latest else None
         previous_message_id = int(latest["message_id"]) if latest else None
 
@@ -586,11 +590,14 @@ def build_meeting_log_command(
                 exc.status,
             )
 
+    window_hours = int(config.meeting_log_window.total_seconds() // 3600)
+    window_description = f"過去{window_hours}時間の会話から議事録を作成します(運営用)。"
+
     if config.meeting_log_role_ids:
 
         @app_commands.command(
             name="meeting-log",
-            description="過去24時間の会話から議事録を作成します(運営用)。",
+            description=window_description,
         )
         async def meeting_log(interaction: discord.Interaction) -> None:
             await _handle(interaction)
@@ -600,7 +607,7 @@ def build_meeting_log_command(
         @app_commands.default_permissions(administrator=True)
         @app_commands.command(
             name="meeting-log",
-            description="過去24時間の会話から議事録を作成します(運営用)。",
+            description=window_description,
         )
         async def meeting_log(interaction: discord.Interaction) -> None:
             await _handle(interaction)

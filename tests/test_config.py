@@ -211,6 +211,7 @@ MEETING_LOG_ENV_VARS = (
     "RGA_GEMINI_API_KEY",
     "RGA_GEMINI_MODEL",
     "RGA_MEETING_LOG_ROLE_IDS",
+    "RGA_MEETING_LOG_WINDOW_HOURS",
 )
 
 
@@ -265,6 +266,21 @@ class MeetingLogLoadConfigTests(unittest.TestCase):
             self._load(RGA_MEETING_LOG_ROLE_IDS="10, 20,10").meeting_log_role_ids,
             (10, 20),
         )
+
+    def test_meeting_log_window_defaults_to_24_hours(self) -> None:
+        self.assertEqual(self._load().meeting_log_window, timedelta(hours=24))
+
+    def test_meeting_log_window_custom_hours(self) -> None:
+        self.assertEqual(
+            self._load(RGA_MEETING_LOG_WINDOW_HOURS="48").meeting_log_window,
+            timedelta(hours=48),
+        )
+
+    def test_meeting_log_window_rejects_invalid_values(self) -> None:
+        for value in ("", "abc", "0", "-1", "1.5"):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    self._load(RGA_MEETING_LOG_WINDOW_HOURS=value)
 
 
 SPLIT_ENV_VARS = ("DISCORD_TOKEN", "RGA_REMINDER_VALUE")
