@@ -265,6 +265,8 @@ class Config:
     todo_decide_channels: tuple[tuple[int, int], ...]
     todo_remind_channel_id: int | None
     todo_remind_time: time
+    todo_webhook_secret: str | None
+    todo_webhook_port: int | None
     gemini_api_key: str | None
     gemini_model: str
     meeting_log_role_ids: tuple[int, ...]
@@ -413,6 +415,18 @@ def load_config() -> Config:
         os.getenv("RGA_TODO_BASE_URL"),
         os.getenv("RGA_TODO_LIST_TOKEN"),
     )
+    todo_webhook_secret = os.getenv("RGA_TODO_WEBHOOK_SECRET", "").strip() or None
+    todo_webhook_port_raw = os.getenv("RGA_TODO_WEBHOOK_PORT")
+    todo_webhook_port = (
+        parse_positive_int(todo_webhook_port_raw, "RGA_TODO_WEBHOOK_PORT")
+        if todo_webhook_port_raw and todo_webhook_port_raw.strip()
+        else None
+    )
+    if (todo_webhook_secret is None) != (todo_webhook_port is None):
+        raise ValueError(
+            "RGA_TODO_WEBHOOK_SECRET and RGA_TODO_WEBHOOK_PORT must both be set "
+            "or both be unset."
+        )
     todo_role_ids = parse_discord_ids(
         os.getenv("RGA_TODO_ROLE_IDS", ""),
         "RGA_TODO_ROLE_IDS",
@@ -486,6 +500,8 @@ def load_config() -> Config:
         todo_decide_channels=todo_decide_channels,
         todo_remind_channel_id=todo_remind_channel_id,
         todo_remind_time=todo_remind_time,
+        todo_webhook_secret=todo_webhook_secret,
+        todo_webhook_port=todo_webhook_port,
         gemini_api_key=gemini_api_key,
         gemini_model=gemini_model,
         meeting_log_role_ids=meeting_log_role_ids,

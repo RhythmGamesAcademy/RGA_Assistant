@@ -1,7 +1,9 @@
+import hashlib
+import hmac
 import json
 import unittest
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
 
@@ -432,6 +434,117 @@ class TodoTodoClientTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(TodoTodoError) as caught:
             await client._request("GET", "")
         self.assertNotIn("secret-token", str(caught.exception))
+
+
+class TestTodoTodoClientFetchTodo(unittest.IsolatedAsyncioTestCase):
+    async def test_fetch_todo_returns_dict(self) -> None:
+        client, _ = make_client([FakeResponse(200, {"id": "t1", "title": "hello"})])
+        result = await client.fetch_todo("t1")
+        self.assertEqual(result["id"], "t1")
+
+    async def test_fetch_todo_unwraps_todo_key(self) -> None:
+        client, _ = make_client(
+            [FakeResponse(200, {"todo": {"id": "t1", "title": "wrapped"}})]
+        )
+        result = await client.fetch_todo("t1")
+        self.assertEqual(result["title"], "wrapped")
+
+    async def test_fetch_todo_returns_none_on_404(self) -> None:
+        client, _ = make_client([FakeResponse(404, {"error": "not found"})])
+        result = await client.fetch_todo("missing")
+        self.assertIsNone(result)
+
+
+class TestTodoWebhookHandler(unittest.IsolatedAsyncioTestCase):
+    def _make_scheduler(self, secret="secret", assistant_user_id=None):
+        from unittest.mock import MagicMock
+        from todotodo import TodoReminderScheduler
+
+        config = MagicMock()
+        config.todo_webhook_secret = secret
+        config.todo_remind_channel_id = 123
+
+        todotodo = MagicMock()
+        todotodo.assistant_user_id = assistant_user_id
+        todotodo.ensure_assistant_member = AsyncMock()
+        todotodo.fetch_todo = AsyncMock(return_value={"id": "t1", "title": "New"})
+
+        database = MagicMock()
+        database.claim_new_todos = AsyncMock(return_value=["t1"])
+
+        client = MagicMock()
+        client.fetch_channel = AsyncMock()
+
+        scheduler = TodoReminderScheduler(client, todotodo, config, database)
+        scheduler._send_remind = AsyncMock()
+        return scheduler, todotodo, database
+
+    def _sign(self, secret: str, body: bytes) -> str:
+        return "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+
+    async def test_rejects_invalid_signature(self) -> None:
+        from aiohttp import web
+        scheduler, _, _ = self._make_scheduler()
+        body = b'{"events":[]}'
+        request = MagicMock()
+        request.read = AsyncMock(return_value=body)
+        request.headers = {"X-Todo-Signature-256": "sha256=bad"}
+        resp = await scheduler._handle_todo_webhook(request)
+        self.assertEqual(resp.status, 401)
+
+    async def test_rejects_missing_config(self) -> None:
+        from aiohttp import web
+        scheduler, _, _ = self._make_scheduler(secret=None)
+        request = MagicMock()
+        request.read = AsyncMock(return_value=b"{}")
+        request.headers = {}
+        resp = await scheduler._handle_todo_webhook(request)
+        self.assertEqual(resp.status, 503)
+
+    async def test_processes_created_event(self) -> None:
+        scheduler, todotodo, database = self._make_scheduler()
+        body = json.dumps(
+            {"events": [{"type": "todo.created", "todo": {"id": "t1", "title": "New"}}]}
+        ).encode()
+        request = MagicMock()
+        request.read = AsyncMock(return_value=body)
+        request.headers = {"X-Todo-Signature-256": self._sign("secret", body)}
+        resp = await scheduler._handle_todo_webhook(request)
+        self.assertEqual(resp.status, 200)
+        database.claim_new_todos.assert_awaited_once_with(["t1"])
+        scheduler._send_remind.assert_awaited_once()
+
+    async def test_dedup_skips_already_seen(self) -> None:
+        scheduler, _, database = self._make_scheduler()
+        database.claim_new_todos = AsyncMock(return_value=[])
+        body = json.dumps(
+            {"events": [{"type": "todo.created", "todo": {"id": "t1", "title": "New"}}]}
+        ).encode()
+        request = MagicMock()
+        request.read = AsyncMock(return_value=body)
+        request.headers = {"X-Todo-Signature-256": self._sign("secret", body)}
+        resp = await scheduler._handle_todo_webhook(request)
+        self.assertEqual(resp.status, 200)
+        scheduler._send_remind.assert_not_awaited()
+
+    async def test_skips_bot_created_todo(self) -> None:
+        scheduler, _, database = self._make_scheduler(assistant_user_id="bot-1")
+        body = json.dumps(
+            {
+                "events": [
+                    {
+                        "type": "todo.created",
+                        "todo": {"id": "t1", "title": "New", "user_id": "bot-1"},
+                    }
+                ]
+            }
+        ).encode()
+        request = MagicMock()
+        request.read = AsyncMock(return_value=body)
+        request.headers = {"X-Todo-Signature-256": self._sign("secret", body)}
+        resp = await scheduler._handle_todo_webhook(request)
+        self.assertEqual(resp.status, 200)
+        scheduler._send_remind.assert_not_awaited()
 
 
 if __name__ == "__main__":

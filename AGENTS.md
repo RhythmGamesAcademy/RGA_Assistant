@@ -14,8 +14,10 @@ app (Phase 5). Flat module project — no packages, cogs, or service layers.
   `/lecture` `app_commands.Group`, and `LectureScheduler` (30s `tasks.loop`).
 - `todotodo.py` — Phase 5 TodoTodo integration: `TodoTodoClient` (REST API
   wrapper with exponential-backoff retries on 5xx; never logs the token or
-  URL), `TodoCommands` (`/todo decide`), and `TodoRegistrationScheduler`
-  (60s `tasks.loop` for TODO auto-registration).
+  URL), `TodoCommands` (`/todo decide`), `TodoRegistrationScheduler`
+  (60s `tasks.loop` for TODO auto-registration), and `TodoReminderScheduler`
+  (daily deadline digest poll + webhook receiver at `/webhook/todotodo` for
+  `todo.created` new-item announcements).
 - `meeting_log.py` — Phase 6 meeting log: pure helpers (window computation,
   collection filtering, message formatting, chunk splitting, Gemini prompt
   building, response parsing), `GeminiClient` (aiohttp wrapper for
@@ -205,21 +207,18 @@ fail if run from another directory.
   URLs or raw aiohttp exception messages.**
 - TodoTodo deadline reminder (`TodoReminderScheduler`, 60s loop): when
   `RGA_TODO_REMIND_CHANNEL_ID` is set, each tick GETs the list
-  (`TodoTodoClient.list_todos`) and (1) once a day at `RGA_TODO_REMIND_TIME`
-  (JST) posts the deadline digest via `collect_deadline_reminders`
-  (unfinished todos whose `deadline` JST date is tomorrow = 期限前日, or
-  past = 期限切れ with day count), and (2) announces todos newly created on
-  the TodoTodo side (silent, `build_new_todo_embed`). Bot-created items are
-  excluded via the assistant member id (`userId`/`assigneeId`); seen ids are
-  persisted in `todo_seen_todos` (`TodoDatabase.claim_new_todos` /
-  `seen_todo_count`; the first run on an empty table seeds everything
-  silently — never notify on bootstrap). The digest's last-sent date is
-  in-memory only: a restart after the send time can repost the digest once.
-  Fetch failures retry next minute; a Discord send failure is not retried.
-  The operations mention in both notifications is gated by
-  `TodoDatabase.mention_enabled` / `set_mention_enabled` (stored in
-  `todo_settings`, default off) toggled by `/todo mention` (same permission
-  as decide; excluded users may not run it).
+  (`TodoTodoClient.list_todos`) and once a day at `RGA_TODO_REMIND_TIME`
+  (JST) posts the deadline digest embed to that channel. New-todo detection
+  is webhook-driven: `POST /webhook/todotodo` receives `todo.created`
+  events, verifies `X-Todo-Signature-256` (HMAC-SHA256 with
+  `RGA_TODO_WEBHOOK_SECRET`), deduplicates via `todo_seen_todos`
+  (`TodoDatabase.claim_new_todos`), and announces with `build_new_todo_embed`.
+  Set `RGA_TODO_WEBHOOK_SECRET` and `RGA_TODO_WEBHOOK_PORT` to enable the
+  webhook receiver. The digest's last-sent date is in-memory; a restart after
+  the send time can repost it once. Including 役員/管理者ロール mentions in these
+  notifications is gated by `TodoDatabase.mention_enabled` /
+  `set_mention_enabled` (stored in `todo_settings`, default off) toggled by
+  `/todo mention` (same permission as decide; excluded users may not run it).
 - Meeting log (`/meeting-log`, Phase 6): enabled only when `RGA_GEMINI_API_KEY`
   is set; the command is added to the tree from a
   `build_meeting_log_command(config, database, gemini)` factory. Window is the

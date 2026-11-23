@@ -10,6 +10,9 @@ REST API (Hono + Neon + Vercel) をサーバー側から操作するクライア
 
 import asyncio
 import json
+import hashlib
+import hmac
+import json
 import logging
 from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
@@ -18,6 +21,7 @@ from typing import Any
 import aiohttp
 import discord
 import psycopg
+from aiohttp import web
 from discord import app_commands
 from discord.ext import tasks
 
@@ -323,6 +327,22 @@ class TodoTodoClient:
         if not todo_id:
             raise TodoTodoError("TodoTodo API returned no todo id.")
         return todo_id
+
+    async def fetch_todo(self, todo_id: str) -> dict[str, Any] | None:
+        """Fetch one TODO item by id, or None if not found."""
+        try:
+            data = await self._request("GET", f"/todos/{todo_id}")
+        except TodoTodoError as exc:
+            if "HTTP 404" in str(exc):
+                return None
+            raise
+        if not isinstance(data, dict):
+            return None
+        # Some APIs wrap the item in {"todo": ...} or return it directly.
+        todo = data.get("todo")
+        if isinstance(todo, dict):
+            return todo
+        return data if data.get("id") else None
 
     async def complete_todo(self, todo_id: str) -> None:
         """Update one TODO item to ``status=done`` (partial update)."""
@@ -841,15 +861,14 @@ class TodoRegistrationScheduler:
 
 
 class TodoReminderScheduler:
-    """TodoTodo watch loop: deadline digest + new-item announcements.
+    """TodoTodo watch loop: deadline digest only.
 
     Every 60 seconds (while ``RGA_TODO_REMIND_CHANNEL_ID`` is set) it fetches
-    the list and (1) once a day at the configured JST time posts a silent
-    digest of unfinished todos due tomorrow or overdue, and (2) announces
-    silently any todos created on the TodoTodo side (bot-created ones
-    excluded). The sent date and the seen todo ids are tracked in memory /
-    PostgreSQL respectively; a restart after the digest time can repost it
-    once, and the first run after deployment only seeds existing ids.
+    the list and once a day at the configured JST time posts a silent
+    summary of due-soon / overdue incomplete todos. New-todo detection is
+    handled by the webhook endpoint (``/webhook/todotodo``) instead of
+    polling. The sent date is tracked in memory; a restart after the digest
+    time can repost it once.
     """
 
     def __init__(
@@ -883,7 +902,6 @@ class TodoReminderScheduler:
             )
             return
         await self._maybe_send_deadline_digest(payload, now)
-        await self._notify_new_todos(payload)
 
     async def _maybe_send_deadline_digest(
         self, payload: Any, now: datetime
@@ -910,58 +928,90 @@ class TodoReminderScheduler:
         except discord.HTTPException:
             logger.exception("Failed to send the TodoTodo deadline reminder")
 
-    async def _notify_new_todos(self, payload: Any) -> None:
-        """Announce todos created on the TodoTodo side since the last check.
 
-        Bot-created todos (the assistant member is their assignee/user) are
-        excluded; the first run with an empty seen-table only seeds the
-        existing ids without notifying.
+
+    async def _handle_todo_webhook(self, request: web.Request) -> web.Response:
+        """Handle incoming TodoTodo webhook for new todo detection.
+
+        Verifies HMAC-SHA256 signature and processes todo.created events.
         """
-        todos = [
-            todo
-            for todo in (payload or {}).get("todos") or []
-            if isinstance(todo, dict) and todo.get("id")
-        ]
-        if not todos:
-            return
-        if self.todotodo.assistant_user_id is None:
+        secret = self.config.todo_webhook_secret
+        if not secret:
+            return web.Response(status=503, text="Webhook not configured")
+
+        body = await request.read()
+        sig_header = request.headers.get("X-Todo-Signature-256", "")
+        expected = "sha256=" + hmac.new(
+            secret.encode(), body, hashlib.sha256
+        ).hexdigest()
+        if not hmac.compare_digest(sig_header, expected):
+            logger.warning("Invalid TodoTodo webhook signature")
+            return web.Response(status=401, text="Invalid signature")
+
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError:
+            return web.Response(status=400, text="Invalid JSON")
+
+        events = payload.get("events") or []
+        new_todos: list[dict[str, Any]] = []
+        for event in events:
+            if event.get("type") != "todo.created":
+                continue
+            todo = event.get("todo") or {}
+            todo_id = str(todo.get("id") or "").strip()
+            if not todo_id:
+                continue
+
+            # Idempotent dedup before doing any network work.
+            claimed = await self.database.claim_new_todos([todo_id])
+            if not claimed:
+                continue
+
+            # Best-effort: resolve assistant user so bot-created TODOs are
+            # not announced (same as the old polling behavior).
+            if self.todotodo.assistant_user_id is None:
+                try:
+                    await self.todotodo.ensure_assistant_member()
+                except TodoTodoError as exc:
+                    logger.warning(
+                        "Could not resolve assistant member for webhook "
+                        "new-todo check: %s",
+                        exc,
+                    )
+
+            if (
+                self.todotodo.assistant_user_id is not None
+                and str(todo.get("user_id") or "") == self.todotodo.assistant_user_id
+            ):
+                continue
+
+            fetched = todo if todo.get("title") else None
+            if fetched is None:
+                try:
+                    fetched = await self.todotodo.fetch_todo(todo_id)
+                except TodoTodoError as exc:
+                    logger.warning(
+                        "Failed to fetch TodoTodo item %s from webhook: %s",
+                        todo_id,
+                        exc,
+                    )
+                    continue
+            if fetched:
+                new_todos.append(fetched)
+
+        if new_todos:
             try:
-                await self.todotodo.ensure_assistant_member()
-            except TodoTodoError as exc:
-                logger.warning(
-                    "Could not resolve the assistant member for the "
-                    "new-todo check: %s",
-                    exc,
+                embed = build_new_todo_embed(new_todos)
+                await self._send_remind(embed)
+                logger.info(
+                    "Announced %s new TodoTodo item(s) via webhook",
+                    len(new_todos),
                 )
-                return
-        assistant = self.todotodo.assistant_user_id
-        candidates = [
-            todo
-            for todo in todos
-            if todo.get("userId") != assistant
-            and todo.get("assigneeId") != assistant
-        ]
-        all_ids = [todo["id"] for todo in todos]
-        try:
-            if await self.database.seen_todo_count() == 0:
-                # Bootstrap: seed every current id silently.
-                await self.database.claim_new_todos(all_ids)
-                return
-            new_ids = set(await self.database.claim_new_todos(
-                [todo["id"] for todo in candidates]
-            ))
-        except psycopg.Error:
-            logger.exception("Failed to track seen TodoTodo items")
-            return
-        fresh = [todo for todo in candidates if todo["id"] in new_ids]
-        if not fresh:
-            return
-        embed = build_new_todo_embed(fresh)
-        try:
-            await self._send_remind(embed)
-            logger.info("Announced %s new TodoTodo items", len(fresh))
-        except discord.HTTPException:
-            logger.exception("Failed to announce new TodoTodo items")
+            except (discord.HTTPException, TodoTodoError):
+                logger.exception("Failed to announce webhook TodoTodo items")
+
+        return web.Response(status=200)
 
     async def _send_remind(self, embed: discord.Embed) -> None:
         """Post a silent (@silent equivalent) reminder to the configured channel.

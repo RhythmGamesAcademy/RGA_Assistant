@@ -5,6 +5,7 @@ from typing import Any
 import aiohttp
 import discord
 import psycopg
+from aiohttp import web
 from discord import app_commands
 from discord.ext import tasks
 
@@ -517,6 +518,7 @@ class RGAAssistant(discord.Client):
         self.todo_database: TodoDatabase | None = None
         self.todo_scheduler: TodoRegistrationScheduler | None = None
         self.todo_reminder: TodoReminderScheduler | None = None
+        self._todo_webhook_runner: web.AppRunner | None = None
         self.meeting_session: aiohttp.ClientSession | None = None
         self.meeting_client: GeminiClient | None = None
         self.meeting_log_database: MeetingLogDatabase | None = None
@@ -564,6 +566,19 @@ class RGAAssistant(discord.Client):
                 self, self.todo_client, self.config, self.todo_database
             )
             self.todo_reminder.start()
+            # Start webhook server if configured
+            if self.config.todo_webhook_secret and self.config.todo_webhook_port:
+                app = web.Application()
+                app.router.add_post('/webhook/todotodo', self.todo_reminder._handle_todo_webhook)
+                runner = web.AppRunner(app)
+                await runner.setup()
+                site = web.TCPSite(runner, '0.0.0.0', self.config.todo_webhook_port)
+                await site.start()
+                self._todo_webhook_runner = runner
+                logger.info(
+                    "TodoTodo webhook server started on port %s",
+                    self.config.todo_webhook_port,
+                )
         self.tree.add_command(
             TodoCommands(self.config, self.todo_database, self.todo_client)
         )
@@ -591,6 +606,9 @@ class RGAAssistant(discord.Client):
 
     async def close(self) -> None:
         logger.info("Shutting down RGA Assistant")
+        if self._todo_webhook_runner is not None:
+            await self._todo_webhook_runner.cleanup()
+            self._todo_webhook_runner = None
         if self.jev_session is not None:
             await self.jev_session.close()
             self.jev_session = None

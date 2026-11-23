@@ -1222,9 +1222,7 @@ class TodoDatabase:
     async def claim_new_todos(self, todo_ids: list[str]) -> list[str]:
         """Mark the given todo ids as seen and return the previously unseen.
 
-        Used to detect TodoTodo-side created items: the first call on an
-        empty table returns every id, so callers must bootstrap (see
-        ``seen_todo_count``) before notifying.
+        Used by the webhook handler for idempotency (todo_id dedup).
         """
         if not todo_ids:
             return []
