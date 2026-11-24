@@ -422,10 +422,11 @@ def load_config() -> Config:
         if todo_webhook_port_raw and todo_webhook_port_raw.strip()
         else None
     )
-    if (todo_webhook_secret is None) != (todo_webhook_port is None):
+    # Secret is optional; if not set, webhook runs without HMAC signature verification
+    # Port is required if secret is configured
+    if todo_webhook_port is None and todo_webhook_secret is not None:
         raise ValueError(
-            "RGA_TODO_WEBHOOK_SECRET and RGA_TODO_WEBHOOK_PORT must both be set "
-            "or both be unset."
+            "RGA_TODO_WEBHOOK_PORT must be set if RGA_TODO_WEBHOOK_SECRET is configured."
         )
     todo_role_ids = parse_discord_ids(
         os.getenv("RGA_TODO_ROLE_IDS", ""),

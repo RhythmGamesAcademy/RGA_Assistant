@@ -80,8 +80,8 @@ Botを再起動してください。
 | `RGA_JEV_EVALUATION_COOLDOWN_SECONDS` | | `600` | 同じチケットのJev再評価までの最短間隔（秒、クレジット節約用）。 |
 | `RGA_TODO_BASE_URL` | △ | 空 | トドTODOのAPIのBase URL。`RGA_TODO_LIST_TOKEN` と**両方**設定すると連携が有効になります。秘密情報を含むため `.env` に記載します。 |
 | `RGA_TODO_LIST_TOKEN` | △ | 空 | トドTODOのリストトークン（認可に使用）。ソース・ログ・チャットに出力しないこと。 |
-| `RGA_TODO_WEBHOOK_SECRET` | △ | 空 | トドTODO Webhook の署名検証用共有シークレット。`RGA_TODO_WEBHOOK_PORT` とセットで設定すると、新規Todo検知をWebhookで受信します。 |
-| `RGA_TODO_WEBHOOK_PORT` | △ | 空 | トドTODO Webhook を受信するローカルポート（例: `8080`）。`RGA_TODO_WEBHOOK_SECRET` とセットで設定してください。 |
+| `RGA_TODO_WEBHOOK_SECRET` | △ | 空 | トドTODO Webhook の署名検証用共有シークレット。未設定の場合は署名検証を行わずに受信します（`RGA_TODO_WEBHOOK_PORT` のみで有効化可能）。 |
+| `RGA_TODO_WEBHOOK_PORT` | △ | 空 | トドTODO Webhook を受信するローカルポート（例: `8080`）。設定するとWebhook受信が有効になります。 |
 | `RGA_TODO_ROLE_IDS` | | 空 | `/todo decide` を実行できるロールID（カンマ区切り）。空の場合は管理者のみ。設定している場合はロール保持者の過半数（繰り上げ）の同意でTODOが決着します。 |
 | `RGA_TODO_EXCLUDED_USER_IDS` | | 空 | `/todo decide` を実行できないユーザーID（カンマ区切り）。しきい値の分母からも除外されます。 |
 | `RGA_TODO_DECIDE_CHANNELS` | | 空 | `/todo decide` を実行できる決着用チャンネルの設定。`カテゴリID:チャンネルID` をカンマ区切りで指定します（例: `111:222,333:444`）。未設定の場合 `/todo decide` はどこでも実行できません。 |

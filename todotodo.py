@@ -936,17 +936,20 @@ class TodoReminderScheduler:
         Verifies HMAC-SHA256 signature and processes todo.created events.
         """
         secret = self.config.todo_webhook_secret
-        if not secret:
-            return web.Response(status=503, text="Webhook not configured")
-
         body = await request.read()
-        sig_header = request.headers.get("X-Todo-Signature-256", "")
-        expected = "sha256=" + hmac.new(
-            secret.encode(), body, hashlib.sha256
-        ).hexdigest()
-        if not hmac.compare_digest(sig_header, expected):
-            logger.warning("Invalid TodoTodo webhook signature")
-            return web.Response(status=401, text="Invalid signature")
+        if secret:
+            sig_header = request.headers.get("X-Todo-Signature-256", "")
+            expected = "sha256=" + hmac.new(
+                secret.encode(), body, hashlib.sha256
+            ).hexdigest()
+            if not hmac.compare_digest(sig_header, expected):
+                logger.warning("Invalid TodoTodo webhook signature")
+                return web.Response(status=401, text="Invalid signature")
+        else:
+            logger.warning(
+                "TodoTodo webhook signature verification is disabled "
+                "(RGA_TODO_WEBHOOK_SECRET is not set)"
+            )
 
         try:
             payload = json.loads(body)

@@ -211,10 +211,10 @@ fail if run from another directory.
   (JST) posts the deadline digest embed to that channel. New-todo detection
   is webhook-driven: `POST /webhook/todotodo` receives `todo.created`
   events, verifies `X-Todo-Signature-256` (HMAC-SHA256 with
-  `RGA_TODO_WEBHOOK_SECRET`), deduplicates via `todo_seen_todos`
+  `RGA_TODO_WEBHOOK_SECRET` when configured), deduplicates via `todo_seen_todos`
   (`TodoDatabase.claim_new_todos`), and announces with `build_new_todo_embed`.
-  Set `RGA_TODO_WEBHOOK_SECRET` and `RGA_TODO_WEBHOOK_PORT` to enable the
-  webhook receiver. The digest's last-sent date is in-memory; a restart after
+  Set `RGA_TODO_WEBHOOK_PORT` to enable the webhook receiver
+  (`RGA_TODO_WEBHOOK_SECRET` is optional; when unset, signature verification is skipped). The digest's last-sent date is in-memory; a restart after
   the send time can repost it once. Including 役員/管理者ロール mentions in these
   notifications is gated by `TodoDatabase.mention_enabled` /
   `set_mention_enabled` (stored in `todo_settings`, default off) toggled by

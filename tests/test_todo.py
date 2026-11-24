@@ -492,14 +492,17 @@ class TestTodoWebhookHandler(unittest.IsolatedAsyncioTestCase):
         resp = await scheduler._handle_todo_webhook(request)
         self.assertEqual(resp.status, 401)
 
-    async def test_rejects_missing_config(self) -> None:
-        from aiohttp import web
-        scheduler, _, _ = self._make_scheduler(secret=None)
+    async def test_accepts_without_secret(self) -> None:
+        scheduler, _, database = self._make_scheduler(secret=None)
+        body = json.dumps(
+            {"events": [{"type": "todo.created", "todo": {"id": "t1", "title": "New"}}]}
+        ).encode()
         request = MagicMock()
-        request.read = AsyncMock(return_value=b"{}")
+        request.read = AsyncMock(return_value=body)
         request.headers = {}
         resp = await scheduler._handle_todo_webhook(request)
-        self.assertEqual(resp.status, 503)
+        self.assertEqual(resp.status, 200)
+        database.claim_new_todos.assert_awaited_once_with(["t1"])
 
     async def test_processes_created_event(self) -> None:
         scheduler, todotodo, database = self._make_scheduler()

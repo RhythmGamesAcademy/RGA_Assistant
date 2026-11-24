@@ -566,8 +566,8 @@ class RGAAssistant(discord.Client):
                 self, self.todo_client, self.config, self.todo_database
             )
             self.todo_reminder.start()
-            # Start webhook server if configured
-            if self.config.todo_webhook_secret and self.config.todo_webhook_port:
+            # Start webhook server if configured (port is required; secret is optional)
+            if self.config.todo_webhook_port:
                 app = web.Application()
                 app.router.add_post('/webhook/todotodo', self.todo_reminder._handle_todo_webhook)
                 runner = web.AppRunner(app)
@@ -576,8 +576,9 @@ class RGAAssistant(discord.Client):
                 await site.start()
                 self._todo_webhook_runner = runner
                 logger.info(
-                    "TodoTodo webhook server started on port %s",
+                    "TodoTodo webhook server started on port %s (signature verification: %s)",
                     self.config.todo_webhook_port,
+                    "enabled" if self.config.todo_webhook_secret else "disabled",
                 )
         self.tree.add_command(
             TodoCommands(self.config, self.todo_database, self.todo_client)
