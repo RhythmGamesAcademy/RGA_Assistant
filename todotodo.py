@@ -9,11 +9,11 @@ REST API (Hono + Neon + Vercel) をサーバー側から操作するクライア
 """
 
 import asyncio
-import json
 import hashlib
 import hmac
 import json
 import logging
+import time
 from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -58,6 +58,9 @@ TODO_RETRY_SECONDS = 60.0
 
 # 期限リマインドのチェックループ間隔 (秒)。
 TODO_REMIND_TICK_SECONDS = 60
+
+# Webhook未設定時の代替: 新規TODO検知ポーリング間隔 (秒)。
+TODO_NEW_TODO_POLL_SECONDS = 30 * 60
 
 # Bot 内の JST 固定 (main.py と同じ扱い)。
 JST = timezone(timedelta(hours=9), name="JST")
@@ -861,15 +864,16 @@ class TodoRegistrationScheduler:
 
 
 class TodoReminderScheduler:
-    """TodoTodo watch loop: deadline digest only.
+    """TodoTodo watch loop: deadline digest and new-todo detection.
 
-    Every 60 seconds (while ``RGA_TODO_REMIND_CHANNEL_ID`` is set) it fetches
-    the list and once a day at the configured JST time posts a silent
-    summary of due-soon / overdue incomplete todos. New-todo detection is
-    handled by the webhook endpoint (``/webhook/todotodo``) instead of
-    polling. The sent date is tracked in memory; a restart after the digest
-    time can repost it once.
-    """
+    Every 60 seconds (while ``RGA_TODO_REMIND_CHANNEL_ID`` is set) it runs
+    the deadline-digest check and once a day at the configured JST time posts
+    a silent embed listing todos due within ``RGA_TODO_REMIND_DAYS`` days.
+
+    New-todo detection prefers webhook delivery at ``/webhook/todotodo``.
+    When the webhook is not configured, this scheduler falls back to polling
+    the TodoTodo list every ``TODO_NEW_TODO_POLL_SECONDS``.
+    """"""
 
     def __init__(
         self,
@@ -883,6 +887,7 @@ class TodoReminderScheduler:
         self.config = config
         self.database = database
         self._last_sent_date: str | None = None
+        self._last_new_todo_poll_at: float = 0.0
 
     def start(self) -> None:
         self.remind_loop.start()
@@ -901,6 +906,8 @@ class TodoReminderScheduler:
                 exc,
             )
             return
+
+        await self._maybe_poll_new_todos(payload, now)
         await self._maybe_send_deadline_digest(payload, now)
 
     async def _maybe_send_deadline_digest(
